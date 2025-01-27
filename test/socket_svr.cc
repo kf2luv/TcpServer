@@ -9,7 +9,8 @@ int main() {
         std::cerr << "Create Server error" << std::endl;
         return 1;
     }
-    // std::vector<std::thread> workers;
+
+
     while(true) {
         int newfd = list_sock.Accept();
         if(newfd < 0) {

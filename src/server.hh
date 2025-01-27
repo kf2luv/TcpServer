@@ -401,6 +401,16 @@ public:
         _revents = revents;
     }
 
+    int Fd() const
+    {
+        return _fd;
+    }
+
+    uint32_t Events() const
+    {
+        return _events;
+    }
+
     void setReadCallback(const EventCallback &event_cb)
     {
         _read_callback = event_cb;
@@ -529,4 +539,118 @@ private:
     EventCallback _error_callback;
     EventCallback _close_callback;
     EventCallback _any_callback;
+};
+
+/*
+
+    Poller: 事件监控器
+
+*/
+class Poller
+{
+    const static size_t MAX_EVENTS = 64;
+    const static int WAIT_TIMEOUT = -1;
+
+public:
+    Poller()
+    {
+        _epfd = epoll_create(MAX_EVENTS);
+        if (_epfd < 0)
+        {
+            DF_ERROR("Epoll create failed, %s", strerror(errno));
+            abort();
+        }
+    }
+    ~Poller()
+    {
+        close(_epfd);
+    }
+    // 添加或修改监控事件
+    bool UpdateEvent(Channel *channel)
+    {
+        assert(channel);
+        // 存在, Modify；不存在, Add
+        int op = hasChannel(channel) ? EPOLL_CTL_MOD : EPOLL_CTL_ADD;
+        if (!epollControlHelper(op, channel))
+        {
+            return false;
+        }
+        // 修改描述符与channel的映射关系
+        _fdToChannel[channel->Fd()] = channel;
+        return true;
+    }
+
+    // 移除监控事件
+    bool RemoveEvent(Channel *channel)
+    {
+        assert(channel);
+        int fd = channel->Fd();
+        if (!hasChannel(channel))
+        {
+            // 并没有对此fd进行监控，不用移除
+            return true;
+        }
+        // 1.从epoll红黑树中删除
+        if (!epollControlHelper(EPOLL_CTL_DEL, channel))
+        {
+            return false;
+        }
+        // 2.从哈希映射中删除
+        _fdToChannel.erase(fd);
+    }
+
+    // 开始监控，返回活跃Channel
+    void poll(std::vector<Channel *>& actives)
+    {
+        // 等待epoll事件发生
+        int nfds = epoll_wait(_epfd, _events, MAX_EVENTS, WAIT_TIMEOUT);
+        if (nfds < 0)
+        {
+            if(errno == EINTR)
+            {
+                return;
+            }
+            DF_ERROR("Epoll wait failed: %s", strerror(errno));
+            abort();
+        }
+        // 记录并返回活跃的Channel
+        actives.resize(nfds);
+        for (int i = 0; i < nfds; i++)
+        {
+            auto it = _fdToChannel.find(_events[i].data.fd);
+            assert(it != _fdToChannel.end());
+
+            //添加actives
+            actives[i] = it->second;
+            //设置Channel的就绪事件
+            actives[i]->setREvents(_events[i].events);
+        }
+    }
+
+private:
+    bool epollControlHelper(int op, Channel *channel)
+    {
+        int fd = channel->Fd();
+        struct epoll_event event;
+        event.events = channel->Events();
+        event.data.fd = fd;
+
+        int ret = epoll_ctl(_epfd, op, fd, &event);
+        if (ret < 0)
+        {
+            DF_ERROR("Epoll Control failed, fd: %d, error: %s", fd, strerror(errno));
+            return false;
+        }
+        return true;
+    }
+
+    bool hasChannel(const Channel *channel)
+    {
+        return _fdToChannel.find(channel->Fd()) != _fdToChannel.end();
+    }
+
+private:
+    int _epfd;
+    struct epoll_event _events[MAX_EVENTS];
+    std::unordered_map<int, Channel *> _fdToChannel;
 };
