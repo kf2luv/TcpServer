@@ -196,6 +196,7 @@ public:
     {
         Close();
     }
+    Socket(int fd) : _sockfd(fd) {}
 
     bool Create()
     {
@@ -241,12 +242,18 @@ public:
         return true;
     }
 
+    //返回-2表示还可以重新accpet
+    //返回-1表示accpet异常
     int Accept()
     {
         int fd = accept(_sockfd, NULL, NULL);
         if (fd < 0)
         {
+            if(errno == EAGAIN || errno == EINTR) {
+                return -2;
+            }
             DF_ERROR("Accept new fd failed: %s", strerror(errno));
+            return -1;
         }
         return fd;
     }
@@ -258,7 +265,6 @@ public:
         svr.sin_port = htons(svr_port);
         if (inet_pton(AF_INET, svr_ip.c_str(), &svr.sin_addr.s_addr) != 1)
         {
-
             return false;
         }
 
@@ -274,52 +280,69 @@ public:
     void Close()
     {
         if (_sockfd >= 0)
+        {
             close(_sockfd);
+            _sockfd = -1;
+        }
     }
 
-    int GetSockfd() const
+    int Fd() const
     {
         return _sockfd;
     }
 
-    // 接收数据
+    // 接收数据（默认是阻塞接收）
     ssize_t Recv(void *buf, size_t len, int flags = 0)
     {
         assert(buf != nullptr);
         ssize_t ret = recv(_sockfd, buf, len, flags);
-        if (ret < 0)
+
+        if (ret <= 0)
         {
+            //可以重新接收数据，返回0
+            if(errno == EAGAIN || errno == EINTR){
+                return 0;
+            }
+            //接收出错 or 连接断开，不能重新接收数据，返回-1
             DF_ERROR("Recv from fd-%d failed: %s", _sockfd, strerror(errno));
-        }
-        else if (ret == 0)
-        {
-            DF_INFO("fd-%d closed", _sockfd);
+            return -1;
         }
         // 数据接收成功
         return ret;
     }
+    // 非阻塞接收
+    ssize_t NonBlockRecv(void *buf, size_t len)
+    {
+        return Recv(buf, len, MSG_DONTWAIT);
+    }
 
     // 发送数据
-    ssize_t Send(const void *buf, size_t len, int flags)
+    ssize_t Send(const void *buf, size_t len, int flags = 0)
     {
         assert(buf != nullptr);
         ssize_t ret = send(_sockfd, buf, len, flags);
         if (ret < 0)
         {
+            //可以重新发送数据，返回0
+            if(errno == EAGAIN || errno == EINTR){
+                return 0;
+            }
+            //发送出错 or 连接断开，不能重新发送数据，返回-1
             DF_ERROR("Send toto fd-%d failed: %s", _sockfd, strerror(errno));
-        }
-        else if (ret == 0)
-        {
-            DF_INFO("fd-%d closed", _sockfd);
+            return -1;
         }
         // 数据发送成功
         return ret;
+    }
+    ssize_t NonBlockSend(const void *buf, size_t len)
+    {
+        return Send(buf, len, MSG_DONTWAIT);
     }
 
     // 创建一个server连接
     bool CreateServer(const uint16_t &port, const std::string &ip = "0.0.0.0")
     {
-        return Create() && Bind(ip, port) && Listen();
+        return Create() && SetNonBlock() && SetAddrReuse() && Bind(ip, port) && Listen();
     }
 
     // 创建一个client连接
