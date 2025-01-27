@@ -5,7 +5,7 @@ int main()
     Socket cli_sock;
     cli_sock.Create();
     cli_sock.Connect("127.0.0.1", 8888);
-    std::string msg = "X";
+    std::string msg = "hello";
     while (true)
     {
         sleep(1);
@@ -20,7 +20,6 @@ int main()
         }
         else
         {
-            msg += 'X';
         }
     }
     return 0;

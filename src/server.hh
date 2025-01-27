@@ -389,11 +389,12 @@ private:
     Channel事件管理器
 
 */
+class Poller;
 class Channel
 {
     using EventCallback = std::function<void()>; // 事件回调函数类型
 public:
-    Channel(int fd) : _fd(fd) {}
+    Channel(int fd, Poller* poller) : _fd(fd), _poller(poller) {}
 
     // EventLoop监控到事件发生后，调用此函数
     void setREvents(uint32_t revents)
@@ -437,42 +438,58 @@ public:
     {
         _events |= EPOLLIN;
         // 添加到EventLoop的事件监控中 TODO
+        update();
     }
     // 启动可写事件监控
     void enableWrite()
     {
         _events |= EPOLLOUT;
+        update();
     }
     // 关闭可读事件监控
     void disableRead()
     {
         _events &= ~EPOLLIN;
+        update();
     }
     // 关闭可写事件监控
     void disableWrite()
     {
         _events &= ~EPOLLOUT;
+        update();
     }
     // 关闭所有事件监控
     void disableAll()
     {
         _events = 0;
+        update();
     }
     // 是否监控了读事件
-    bool readAble()
+    bool isReadAble()
     {
         return (_events & EPOLLIN);
     }
     // 是否监控了写事件
-    bool writeAble()
+    bool isWriteAble()
     {
         return (_events & EPOLLOUT);
     }
 
+    // 向事件监控器更新当前Channel关心的事件（当前事件监控器是Poller，后续要集成到EventLoop中）
+    void update();
+    // 从事件监控器删除当前Channel的监控
+    void remove();
+
     // 事件处理，描述符触发事件，又这个函数分辨是哪种事件并调用相应的回调函数
     // 如果在回调中关闭了连接，后续事件处理可能会因为资源无效而出问题
     void handleEvent()
-    {
+    { 
+        // 任意事件发生
+        if (_any_callback)
+        {
+            DF_DEBUG("revents: %d", _revents);
+            _any_callback();
+        }
         // 可读事件发生 （正常地收到可读数据 or 对端关闭写端或连接时 or 收到带外数据）
         if ((_revents & EPOLLIN) || (_revents & EPOLLRDHUP) || (_revents & EPOLLPRI))
         {
@@ -480,35 +497,19 @@ public:
             {
                 _read_callback();
             }
-            // 任意事件发生
-            if (_any_callback)
-            {
-                _any_callback();
-            }
         }
         // 可写事件发生（写数据时可能发现对端关闭了连接，发不过去，此时本地也要关闭连接，因此可能会导致连接关闭）
-        if (_revents & EPOLLOUT)
+        else if (_revents & EPOLLOUT)
         {
             if (_write_callback)
             {
                 _write_callback();
             }
-            // 任意事件发生
-            if (_any_callback)
-            {
-                _any_callback();
-            }
         }
-
         // 有可能导致连接关闭的事件处理，一次只执行一个
         // 错误事件发生
         else if (_revents & EPOLLERR)
         {
-            // 任意事件发生 (错误处理前执行，不然连接就断开了)
-            if (_any_callback)
-            {
-                _any_callback();
-            }
             if (_error_callback)
             {
                 _error_callback();
@@ -517,11 +518,6 @@ public:
         // 关闭连接事件发生
         else if (_revents & EPOLLHUP)
         {
-            // 任意事件发生
-            if (_any_callback)
-            {
-                _any_callback();
-            }
             if (_close_callback)
             {
                 _close_callback();
@@ -539,6 +535,8 @@ private:
     EventCallback _error_callback;
     EventCallback _close_callback;
     EventCallback _any_callback;
+
+    Poller* _poller;
 };
 
 /*
@@ -566,7 +564,7 @@ public:
         close(_epfd);
     }
     // 添加或修改监控事件
-    bool UpdateEvent(Channel *channel)
+    bool updateEvent(Channel *channel)
     {
         assert(channel);
         // 存在, Modify；不存在, Add
@@ -581,7 +579,7 @@ public:
     }
 
     // 移除监控事件
-    bool RemoveEvent(Channel *channel)
+    bool removeEvent(Channel *channel)
     {
         assert(channel);
         int fd = channel->Fd();
@@ -597,6 +595,7 @@ public:
         }
         // 2.从哈希映射中删除
         _fdToChannel.erase(fd);
+        return true;
     }
 
     // 开始监控，返回活跃Channel
@@ -614,6 +613,7 @@ public:
             abort();
         }
         // 记录并返回活跃的Channel
+        actives.clear();
         actives.resize(nfds);
         for (int i = 0; i < nfds; i++)
         {
@@ -650,7 +650,17 @@ private:
     }
 
 private:
-    int _epfd;
-    struct epoll_event _events[MAX_EVENTS];
-    std::unordered_map<int, Channel *> _fdToChannel;
+    int _epfd;                                       // epoll操作句柄
+    struct epoll_event _events[MAX_EVENTS];          // 保存内核监控到的活跃事件
+    std::unordered_map<int, Channel *> _fdToChannel; // 描述符fd和channel的映射关系
 };
+
+void Channel::update()
+{
+    _poller->updateEvent(this);
+}
+
+void Channel::remove()
+{
+    _poller->removeEvent(this);
+}
