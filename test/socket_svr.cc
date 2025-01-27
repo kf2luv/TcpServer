@@ -13,7 +13,8 @@ int main() {
     while(true) {
         int newfd = list_sock.Accept();
         if(newfd < 0) {
-            if(newfd == -2){
+            if(newfd == -2)
+            {
                 continue;
             }
             std::cerr << "accept error" << std::endl;
@@ -25,12 +26,18 @@ int main() {
             char buffer[64]{};
             while(true) {
                 int ret = conn_sock.NonBlockRecv(buffer, 63);
-                if(ret < 0){
+                if(ret < 0)
+                {
                     std::cerr << "连接已关闭" << std::endl;
+                    conn_sock.Close(); 
                     break;
-                } else if(ret == 0){
+                } 
+                else if(ret == 0)
+                {
                     continue;
-                } else {
+                } 
+                else 
+                {
                     std::cout << "echo: " << buffer << std::endl;
                 }
             }

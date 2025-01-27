@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstring>
+#include <functional>
 
 #include <unistd.h>
 #include <fcntl.h>
@@ -11,6 +12,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <sys/epoll.h>
 
 #include "../logger/ckflog.hpp"
 
@@ -242,14 +244,15 @@ public:
         return true;
     }
 
-    //返回-2表示还可以重新accpet
-    //返回-1表示accpet异常
+    // 返回-2表示还可以重新accpet
+    // 返回-1表示accpet异常
     int Accept()
     {
         int fd = accept(_sockfd, NULL, NULL);
         if (fd < 0)
         {
-            if(errno == EAGAIN || errno == EINTR) {
+            if (errno == EAGAIN || errno == EINTR)
+            {
                 return -2;
             }
             DF_ERROR("Accept new fd failed: %s", strerror(errno));
@@ -299,11 +302,12 @@ public:
 
         if (ret <= 0)
         {
-            //可以重新接收数据，返回0
-            if(errno == EAGAIN || errno == EINTR){
+            // 可以重新接收数据，返回0
+            if (errno == EAGAIN || errno == EINTR)
+            {
                 return 0;
             }
-            //接收出错 or 连接断开，不能重新接收数据，返回-1
+            // 接收出错 or 连接断开，不能重新接收数据，返回-1
             DF_ERROR("Recv from fd-%d failed: %s", _sockfd, strerror(errno));
             return -1;
         }
@@ -323,11 +327,12 @@ public:
         ssize_t ret = send(_sockfd, buf, len, flags);
         if (ret < 0)
         {
-            //可以重新发送数据，返回0
-            if(errno == EAGAIN || errno == EINTR){
+            // 可以重新发送数据，返回0
+            if (errno == EAGAIN || errno == EINTR)
+            {
                 return 0;
             }
-            //发送出错 or 连接断开，不能重新发送数据，返回-1
+            // 发送出错 or 连接断开，不能重新发送数据，返回-1
             DF_ERROR("Send toto fd-%d failed: %s", _sockfd, strerror(errno));
             return -1;
         }
@@ -377,4 +382,151 @@ public:
 
 private:
     int _sockfd;
+};
+
+/*
+
+    Channel事件管理器
+
+*/
+class Channel
+{
+    using EventCallback = std::function<void()>; // 事件回调函数类型
+public:
+    Channel(int fd) : _fd(fd) {}
+
+    // EventLoop监控到事件发生后，调用此函数
+    void setREvents(uint32_t revents)
+    {
+        _revents = revents;
+    }
+
+    void setReadCallback(const EventCallback &event_cb)
+    {
+        _read_callback = event_cb;
+    }
+    void setWriteCallback(const EventCallback &event_cb)
+    {
+        _write_callback = event_cb;
+    }
+    void setErrorCallback(const EventCallback &event_cb)
+    {
+        _error_callback = event_cb;
+    }
+    void setCloseCallback(const EventCallback &event_cb)
+    {
+        _close_callback = event_cb;
+    }
+    void setAnyCallback(const EventCallback &event_cb)
+    {
+        _any_callback = event_cb;
+    }
+
+    // 启动可读事件监控
+    void enableRead()
+    {
+        _events |= EPOLLIN;
+        // 添加到EventLoop的事件监控中 TODO
+    }
+    // 启动可写事件监控
+    void enableWrite()
+    {
+        _events |= EPOLLOUT;
+    }
+    // 关闭可读事件监控
+    void disableRead()
+    {
+        _events &= ~EPOLLIN;
+    }
+    // 关闭可写事件监控
+    void disableWrite()
+    {
+        _events &= ~EPOLLOUT;
+    }
+    // 关闭所有事件监控
+    void disableAll()
+    {
+        _events = 0;
+    }
+    // 是否监控了读事件
+    bool readAble()
+    {
+        return (_events & EPOLLIN);
+    }
+    // 是否监控了写事件
+    bool writeAble()
+    {
+        return (_events & EPOLLOUT);
+    }
+
+    // 事件处理，描述符触发事件，又这个函数分辨是哪种事件并调用相应的回调函数
+    // 如果在回调中关闭了连接，后续事件处理可能会因为资源无效而出问题
+    void handleEvent()
+    {
+        // 可读事件发生 （正常地收到可读数据 or 对端关闭写端或连接时 or 收到带外数据）
+        if ((_revents & EPOLLIN) || (_revents & EPOLLRDHUP) || (_revents & EPOLLPRI))
+        {
+            if (_read_callback)
+            {
+                _read_callback();
+            }
+            // 任意事件发生
+            if (_any_callback)
+            {
+                _any_callback();
+            }
+        }
+        // 可写事件发生（写数据时可能发现对端关闭了连接，发不过去，此时本地也要关闭连接，因此可能会导致连接关闭）
+        if (_revents & EPOLLOUT)
+        {
+            if (_write_callback)
+            {
+                _write_callback();
+            }
+            // 任意事件发生
+            if (_any_callback)
+            {
+                _any_callback();
+            }
+        }
+
+        // 有可能导致连接关闭的事件处理，一次只执行一个
+        // 错误事件发生
+        else if (_revents & EPOLLERR)
+        {
+            // 任意事件发生 (错误处理前执行，不然连接就断开了)
+            if (_any_callback)
+            {
+                _any_callback();
+            }
+            if (_error_callback)
+            {
+                _error_callback();
+            }
+        }
+        // 关闭连接事件发生
+        else if (_revents & EPOLLHUP)
+        {
+            // 任意事件发生
+            if (_any_callback)
+            {
+                _any_callback();
+            }
+            if (_close_callback)
+            {
+                _close_callback();
+            }
+        }
+    }
+
+private:
+    int _fd;           // 管理的描述符
+    uint32_t _events;  // 描述符所关心的事件
+    uint32_t _revents; // 当前描述符触发的事件
+
+    EventCallback _read_callback;
+    EventCallback _write_callback;
+    EventCallback _error_callback;
+    EventCallback _close_callback;
+    EventCallback _any_callback;
 };
