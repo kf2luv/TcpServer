@@ -480,7 +480,7 @@ public:
     // 从事件监控器删除当前Channel的监控
     void remove();
 
-    // 事件处理，描述符触发事件，又这个函数分辨是哪种事件并调用相应的回调函数
+    // 事件处理，描述符触发事件，由这个函数分辨是哪种事件并调用相应的回调函数
     // 如果在回调中关闭了连接，后续事件处理可能会因为资源无效而出问题
     void handleEvent()
     { 
@@ -536,7 +536,7 @@ private:
     EventCallback _close_callback;
     EventCallback _any_callback;
 
-    Poller* _poller;
+    Poller *_poller; // 事件监控器(后续改为EventLoop)
 };
 
 /*
