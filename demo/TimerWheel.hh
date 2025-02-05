@@ -57,12 +57,14 @@ public:
     void addTimer(int id, int timeout, const TimerTask::Task &cb);
     // 重置一个定时任务
     void resetTimer(int id);
-    // 清除一个定时任务
-    void removeTimer(int id);
     // 取消一个定时任务
     void cancelTimer(int id);
     // 运行时间轮
     void run();
+private:
+    // 清除定时任务
+    void removeTimer(int id);
+
     
 private:
     std::vector<std::vector<TimerPtr>> _wheel;     // 存储定时任务的二维数组

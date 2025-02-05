@@ -4,6 +4,7 @@
 #include <cassert>
 #include <cstring>
 #include <functional>
+#include <memory>
 
 #include <unistd.h>
 #include <fcntl.h>
@@ -14,7 +15,7 @@
 #include <arpa/inet.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
-
+#include <sys/timerfd.h>
 
 #include "../logger/ckflog.hpp"
 
@@ -35,34 +36,129 @@ public:
     /// @brief 向缓冲区写入数据
     /// @param data 写入数据起始地址，统一转成void*就不用管类型
     /// @param len 待写入的数据字节数
-    void write(const void *data, size_t len);
+    void write(const void *data, size_t len)
+    {
+        // 1.确保缓冲区的写入空间充足
+        ensureEnoughWriteSpace(len);
 
-    void writeString(const std::string &str);
-    void writeBuffer(Buffer &buf);
+        // 2.写入数据
+        const byte *source = (const byte *)data;
+        std::copy(source, source + len, writePos());
+
+        // 3.移动写偏移
+        _write_idx += len;
+        assert(_write_idx <= _buffer.size());
+    }
+
+    void writeString(const std::string &str)
+    {
+        write(str.c_str(), str.size());
+    }
+
+    void writeBuffer(Buffer &buf)
+    {
+        write(buf.readPos(), buf.readableBytes());
+    }
 
     /// @brief 从缓冲区读取数据，要求获取的len必须小于可读数据字节数
     /// @param data 读取数据起始地址
     /// @param len 待读取的数据字节数
-    void read(void *data, size_t len);
+    void read(void *data, size_t len)
+    {
+        assert(len <= readableBytes());
+
+        // 1.读取数据
+        std::copy(readPos(), readPos() + len, (char *)data);
+
+        // 2.移动读偏移
+        _read_idx += len;
+        assert(_read_idx <= _buffer.size());
+    }
+
     // 获取一个长度为len的字符串
-    std::string readAsString(size_t len);
+    std::string readAsString(size_t len)
+    {
+        assert(len <= readableBytes());
+        std::string str;
+        str.resize(len);
+        read(&str[0], len);
+        return str;
+    }
+
     // 获取读取一行（以/n结尾）
-    std::string getLine();
+    std::string getLine()
+    {
+        byte *pos = (char *)memchr(readPos(), '\n', readableBytes());
+        if (pos == NULL)
+        {
+            return "";
+        }
+        //+1把\n也取出来
+        return readAsString(pos - readPos() + 1);
+    }
 
     // 清理缓冲区
-    void clear();
-    // 判断缓冲区是否为空
-    bool empty();
-    // 获取可读数据大小
-    size_t readableBytes();
+    void clear()
+    {
+        _read_idx = _write_idx = 0;
+    }
 
-    byte *begin();
-    byte *writePos();
-    byte *readPos();
+    // 判断缓冲区是否为空
+    bool empty()
+    {
+        return readableBytes() == 0;
+    }
+
+    // 获取可读数据大小
+    size_t readableBytes()
+    {
+        return _write_idx - _read_idx;
+    }
+
+    byte *begin()
+    {
+        return &_buffer[0];
+    }
+
+    byte *writePos()
+    {
+        return begin() + _write_idx;
+    }
+
+    byte *readPos()
+    {
+        return begin() + _read_idx;
+    }
 
 private:
     // 确保缓冲区中的剩余空间可以写入len个数据
-    void ensureEnoughWriteSpace(size_t len);
+    void ensureEnoughWriteSpace(size_t len)
+    {
+        // 1.判断`write_idx`后的剩余空间是否足够
+        size_t backFreeSpace = _buffer.size() - _write_idx;
+        if (backFreeSpace >= len)
+        {
+            return;
+        }
+
+        // 2.判断总体的剩余空间是否足够
+        if (_read_idx + backFreeSpace >= len)
+        {
+            std::cout << "挪动了一次数据" << std::endl;
+            // 将数据挪到起始位置，读写偏移要跟着移动
+            size_t rbytes = readableBytes();
+            std::copy(readPos(), readPos() + rbytes, begin());
+            _read_idx = 0;
+            _write_idx = rbytes;
+
+            return;
+        }
+
+        // 3.扩容，保证写偏移之后有足够的空间
+        std::cout << "扩容了一次" << std::endl;
+        size_t newSize = _write_idx + len;
+        _buffer.resize(newSize);
+    }
 
 private:
     std::vector<byte> _buffer; // 缓冲区空间（以字节为单位）
@@ -70,126 +166,11 @@ private:
     size_t _write_idx;         // 写偏移
 };
 
-void Buffer::write(const void *data, size_t len)
-{
-    // 1.确保缓冲区的写入空间充足
-    ensureEnoughWriteSpace(len);
-
-    // 2.写入数据
-    const byte *source = (const byte *)data;
-    std::copy(source, source + len, writePos());
-
-    // 3.移动写偏移
-    _write_idx += len;
-    assert(_write_idx <= _buffer.size());
-}
-
-void Buffer::writeString(const std::string &str)
-{
-    write(str.c_str(), str.size());
-}
-
-void Buffer::writeBuffer(Buffer &buf)
-{
-    write(buf.readPos(), buf.readableBytes());
-}
-
-void Buffer::read(void *data, size_t len)
-{
-    assert(len <= readableBytes());
-
-    // 1.读取数据
-    std::copy(readPos(), readPos() + len, (char *)data);
-
-    // 2.移动读偏移
-    _read_idx += len;
-    assert(_read_idx <= _buffer.size());
-}
-
-void Buffer::clear()
-{
-    _read_idx = _write_idx = 0;
-}
-
-bool Buffer::empty()
-{
-    return readableBytes() == 0;
-}
-
-size_t Buffer::readableBytes()
-{
-    return _write_idx - _read_idx;
-}
-
-void Buffer::ensureEnoughWriteSpace(size_t len)
-{
-    // 1.判断`write_idx`后的剩余空间是否足够
-    size_t backFreeSpace = _buffer.size() - _write_idx;
-    if (backFreeSpace >= len)
-    {
-        return;
-    }
-
-    // 2.判断总体的剩余空间是否足够
-    if (_read_idx + backFreeSpace >= len)
-    {
-        std::cout << "挪动了一次数据" << std::endl;
-        // 将数据挪到起始位置，读写偏移要跟着移动
-        size_t rbytes = readableBytes();
-        std::copy(readPos(), readPos() + rbytes, begin());
-        _read_idx = 0;
-        _write_idx = rbytes;
-
-        return;
-    }
-
-    // 3.扩容，保证写偏移之后有足够的空间
-    std::cout << "扩容了一次" << std::endl;
-    size_t newSize = _write_idx + len;
-    _buffer.resize(newSize);
-}
-
-Buffer::byte *Buffer::begin()
-{
-    return &_buffer[0];
-}
-
-Buffer::byte *Buffer::writePos()
-{
-    return begin() + _write_idx;
-}
-
-Buffer::byte *Buffer::readPos()
-{
-    return begin() + _read_idx;
-}
-
-std::string Buffer::readAsString(size_t len)
-{
-    assert(len <= readableBytes());
-    std::string str;
-    str.resize(len);
-    read(&str[0], len);
-    return str;
-}
-
-std::string Buffer::getLine()
-{
-    byte *pos = (char *)memchr(readPos(), '\n', readableBytes());
-    if (pos == NULL)
-    {
-        return "";
-    }
-    //+1把\n也取出来
-    return readAsString(pos - readPos() + 1);
-}
-
 /*
 
     Socket套接字模块
 
 */
-
 class Socket
 {
     static const int DEFAULT_BACKLOG = 64;
@@ -658,11 +639,211 @@ private:
     std::unordered_map<int, Channel *> _fdToChannel; // 描述符fd和channel的映射关系
 };
 
+
 /*
 
-    事件循环
+    Timer：定时器模块
 
 */
+class TimerTask
+{
+public:
+    using Task = std::function<void()>;
+    using Release = std::function<void()>;
+
+    TimerTask(int id, int timeout, Task cb)
+        : _id(id), _timeout(timeout), _callback(cb), _cancelled(false) {}
+
+    ~TimerTask()
+    {
+        if (!_cancelled)
+        {
+            // 如果没有被取消，析构时执行任务
+            _callback();
+            _release();
+        }
+    }
+    void setRelease(const Release &release)
+    {
+        _release = release;
+    }
+    int timeout() const
+    {
+        return _timeout;
+    }
+    void cancel()
+    {
+        _cancelled = true;
+    }
+
+private:
+    int _id;          // 任务编号
+    int _timeout;     // 定时任务的超时时间
+    Task _callback;   // 任务执行的回调函数
+    Release _release; // 释放TimerWheel中的定时任务
+    bool _cancelled;  //任务是否被取消
+};
+class TimerWheel
+{
+    static const size_t MAX_TIMEOUT = 60;
+    using TimerPtr = std::shared_ptr<TimerTask>;
+    using TimerWeak = std::weak_ptr<TimerTask>;
+
+public:
+    TimerWheel(EventLoop *looper)
+        : _wheel(MAX_TIMEOUT), _tick(0), _looper(looper)
+        , _timerfd(createTimerFd()), _timer_channel(std::make_unique<Channel>(_timerfd, _looper))
+    {
+        // 为定时器设置到期任务回调函数
+        _timer_channel->setReadCallback(std::bind(&TimerWheel::onTime, this));
+        // 启动timerfd的读事件监控
+        _timer_channel->enableRead();
+    };
+
+    // 创建一个定时任务
+    void addTimer(int id, int timeout, const TimerTask::Task& cb);
+    // 重置一个定时任务
+    void resetTimer(int id);
+    // 取消一个定时任务
+    void cancelTimer(int id);
+
+    // 运行时间轮一次，即执行秒针指向位置的所有到期任务，随后指针向后偏移一位
+    void runTimerTask()
+    {
+        // 移动秒针
+        _tick++;
+        _tick %= MAX_TIMEOUT;
+
+        // 清空当前秒针位置的数组，释放其中所有任务的shared_ptr
+        _wheel[_tick].clear();
+    }
+
+    //判断定时任务是否存在（存在线程安全问题，只能在EventLoop当前线程调用）
+    bool hasTimer(int id)
+    {
+        return _idToTimer.find(id) != _idToTimer.end();
+    }
+
+private:
+    void addTimerInLoop(int id, int timeout, const TimerTask::Task &cb)
+    {
+        if (hasTimer(id))
+        {
+            return;
+        }
+        // 新建一个TimerTask
+        TimerTask *tt = new TimerTask(id, timeout, cb);
+        tt->setRelease(std::bind(&TimerWheel::removeTimer, this, id));
+
+        // shared_ptr<TimerTask> 存入时间轮
+        TimerPtr ptr(tt); // ptr出了当前作用域会销毁，不影响_wheel中shared_ptr的引用计数
+        int pos = (_tick + timeout) % MAX_TIMEOUT;
+        _wheel[pos].emplace_back(ptr);
+
+        // weak_ptr<TimerTask> 存入哈希表，作为shared_ptr的副本，后续用这个副本可以获取一个新的shared_ptr
+        _idToTimer[id] = TimerWeak(ptr);
+
+        // !!警告!!
+        // 直接使用原始资源的指针创建shared_ptr
+        // 每次都是建立一个新的shared_ptr，新的计数器，并不是共享计数器
+        // 使用weak_ptr解决，weak_ptr.lock()获取的shared_ptr，会增加引用计数
+        //  _wheel[pos].push_back(TimerPtr(tt));
+    }
+    void resetTimerInLoop(int id)
+    {
+        if (!hasTimer(id))
+        {
+            // id不存在，无法重置
+            return;
+        }
+
+        // 根据id所指的weak_ptr，获取一个新的shared_ptr
+        TimerPtr ptr = _idToTimer[id].lock();
+
+        // 新的shared_ptr 存入时间轮
+        int pos = (_tick + ptr->timeout()) % MAX_TIMEOUT;
+        _wheel[pos].push_back(ptr); // 避免push_back增加引用计数?不用，栈变量ptr释放，引用计数--
+    }
+    void cancelTimerInloop(int id)
+    {
+        if (!hasTimer(id))
+        {
+            return;
+        }
+        TimerPtr ptr = _idToTimer[id].lock();
+        ptr->cancel();
+    }
+    // 清除定时任务
+    void removeTimer(int id)
+    {
+        if (!hasTimer(id))
+        {
+            return;
+        }
+        _idToTimer.erase(id);
+    }
+
+    // 创建一个timerfd
+    static int createTimerFd()
+    {
+        // 创建 timerfd
+        int tfd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+        if (tfd == -1)
+        {
+            DF_ERROR("Timerfd create failed");
+            abort();
+        }
+
+        // 设置定时器, 每隔 1 秒，超时一次
+        struct itimerspec its;
+        its.it_value.tv_sec = 1; // 第一次超时的时间：1 秒后
+        its.it_value.tv_nsec = 0;
+        its.it_interval.tv_sec = 1; // 往后间隔时间：1 秒
+        its.it_interval.tv_nsec = 0;
+
+        if (timerfd_settime(tfd, 0, &its, NULL) == -1)
+        {
+            DF_ERROR("Timerfd set time failed");
+            abort();
+        }
+        return tfd;
+    }
+
+    // 读取清空timerfd的数据
+    void readTimerFd()
+    {
+        uint64_t expiration;
+        ssize_t ret = read(_timerfd, &expiration, sizeof(uint64_t));
+        if (ret < 0)
+        {
+            if (errno == EINTR || errno == EAGAIN)
+            {
+                return;
+            }
+            DF_ERROR("Timerfd read failed");
+            return;
+        }
+    }
+
+    // 定时器超时处理的回调函数
+    void onTime()
+    {
+        // 处理timerfd的读事件，把数据读掉，以防一次超时多次处理
+        readTimerFd();
+        // 超时一次，运行一次时间轮
+        runTimerTask();
+    }
+
+private:
+    std::vector<std::vector<TimerPtr>> _wheel;     // 存储定时任务的二维数组
+    std::unordered_map<int, TimerWeak> _idToTimer; // 保存定时任务的哈希表
+    int _tick;                                     // 秒针
+
+    EventLoop *_looper;                      // 绑定的event loop
+    int _timerfd;                            // 用于超时事件监控
+    std::unique_ptr<Channel> _timer_channel; // timerfd的channel
+};
+
 class EventLoop
 {
     using Task = std::function<void()>;
@@ -670,8 +851,9 @@ class EventLoop
 public:
     EventLoop()
         : _eventfd(createEventFd())
-        , _event_channel(new Channel(_eventfd, this))
+        , _event_channel(std::make_unique<Channel>(_eventfd, this))
         , _thread_id(std::this_thread::get_id())
+        , _timer_wheel(this)
     {
         // 给eventfd添加读事件的回调函数
         _event_channel->setReadCallback(std::bind(&EventLoop::readEventFd, this));
@@ -740,6 +922,27 @@ public:
         return _poller.removeEvent(channel);
     }
 
+    // 新增定时任务
+    void addTimer(int id, int timeout, TimerTask::Task cb)
+    {
+        _timer_wheel.addTimer(id, timeout, cb);
+    }
+    // 重置定时任务
+    void resetTimer(int id)
+    {
+        _timer_wheel.resetTimer(id);
+    }
+    // 取消一个定时任务
+    void cancelTimer(int id)
+    {
+        _timer_wheel.cancelTimer(id);
+    }
+
+    bool hasTimer(int id)
+    {
+        return _timer_wheel.hasTimer(id);
+    }
+
 private:
     void runAllTasks()
     {
@@ -774,8 +977,10 @@ private:
     {
         uint64_t signal = 0;
         int ret = read(_eventfd, &signal, sizeof(uint64_t));
-        if(ret < 0) {
-            if(errno == EINTR || errno == EAGAIN) {
+        if (ret < 0)
+        {
+            if (errno == EINTR || errno == EAGAIN)
+            {
                 return;
             }
             DF_ERROR("Eventfd read failed");
@@ -787,8 +992,10 @@ private:
     {
         uint64_t signal = 1;
         int ret = write(_eventfd, &signal, sizeof(uint64_t));
-        if(ret < 0) {
-            if(errno == EINTR || errno == EAGAIN) {
+        if (ret < 0)
+        {
+            if (errno == EINTR || errno == EAGAIN)
+            {
                 return;
             }
             DF_ERROR("Eventfd write failed");
@@ -797,12 +1004,14 @@ private:
     }
 
 private:
-    std::thread::id _thread_id;              // 事件循环所在线程id
-    int _eventfd;                            // 用于唤醒IO事件监听阻塞（向eventfd计数器写入，就有了一个读事件，就可以唤醒了），先去执行任务
+    std::thread::id _thread_id; // 事件循环所在线程id
+    int _eventfd;               // 用于唤醒IO事件监听阻塞
+                                // （向eventfd计数器写入，就有了一个读事件，就可以唤醒了），先去执行任务
     std::unique_ptr<Channel> _event_channel; // eventfd对应的channel
     Poller _poller;                          // 事件监听器
     std::vector<Task> _tasks;                // 任务池
     std::mutex _mtx;                         // 保护任务池
+    TimerWheel _timer_wheel;                 // 定时器
 };
 
 void Channel::update()
@@ -814,3 +1023,22 @@ void Channel::remove()
 {
     _looper->removeEvent(this);
 }
+
+// TimerWheel创建一个定时任务
+void TimerWheel::addTimer(int id, int timeout, const TimerTask::Task &cb)
+{
+    _looper->runInLoop(std::bind(&TimerWheel::addTimerInLoop, this, id, timeout, cb));
+}
+
+// TimerWheel重置一个定时任务
+void TimerWheel::resetTimer(int id)
+{
+    _looper->runInLoop(std::bind(&TimerWheel::resetTimerInLoop, this, id));
+}
+
+// TimerWheel取消一个定时任务
+void TimerWheel::cancelTimer(int id)
+{
+    _looper->runInLoop(std::bind(&TimerWheel::cancelTimerInloop, this, id));
+}
+
