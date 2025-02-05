@@ -421,7 +421,7 @@ public:
     void enableRead()
     {
         _events |= EPOLLIN;
-        // 添加到EventLoop的事件监控中 TODO
+        // 添加到EventLoop的事件监控中
         update();
     }
     // 启动可写事件监控
@@ -1004,9 +1004,9 @@ private:
     }
 
 private:
-    std::thread::id _thread_id; // 事件循环所在线程id
-    int _eventfd;               // 用于唤醒IO事件监听阻塞
-                                // （向eventfd计数器写入，就有了一个读事件，就可以唤醒了），先去执行任务
+    std::thread::id _thread_id;                 // 事件循环所在线程id
+    int _eventfd;                           // 用于唤醒IO事件监听阻塞
+                                                // （向eventfd计数器写入，就有了一个读事件，就可以唤醒了），先去执行任务
     std::unique_ptr<Channel> _event_channel; // eventfd对应的channel
     Poller _poller;                          // 事件监听器
     std::vector<Task> _tasks;                // 任务池

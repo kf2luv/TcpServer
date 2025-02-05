@@ -26,7 +26,6 @@ void HandleRead(Channel *conn_channel)
         // 收到消息后要回复，开启写事件监控，写事件一旦就绪就可以回复
         conn_channel->enableWrite();
     }
-
 }
 void HandleWrite(Channel *conn_channel)
 {
@@ -109,10 +108,10 @@ int main()
     }
     // 创建监听channel（注册到poller中），可读事件触发时，调用AcceptHandler处理
     Channel listen_channel(listen_sock.Fd(), &looper);
-    listen_channel.enableRead();
     listen_channel.setReadCallback(std::bind(AcceptHandler, &listen_channel, &looper));
+    listen_channel.enableRead();
 
-    looper.addTimer(2025, 5, timer_task);
+    // looper.addTimer(2025, 5, timer_task);
 
     while (true)
     {
