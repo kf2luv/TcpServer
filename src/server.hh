@@ -5,6 +5,7 @@
 #include <cstring>
 #include <functional>
 #include <memory>
+#include <typeinfo>
 
 #include <unistd.h>
 #include <fcntl.h>
@@ -19,6 +20,94 @@
 
 #include "../logger/ckflog.hpp"
 
+class Any
+{
+public:
+    Any() : _content(nullptr) {};
+    ~Any()
+    {
+        if (_content)
+        {
+            delete _content;
+        }
+    };
+
+    // 根据传入参数的类型构造Any
+    template <class T>
+    Any(const T &val) : _content(new PlaceHolder<T>(val)) {}
+
+    Any(const Any &other)
+        : _content(nullptr)
+    {
+        if (other._content)
+        {
+            _content = other._content->clone();
+        }
+    }
+
+    template <class T>
+    Any &operator=(const T &val)
+    {
+        if (_content)
+        {
+            delete _content; // 释放旧的content
+        }
+        _content = new PlaceHolder<T>(val); // 创建新的PlaceHolder，这将改变Any存储类型
+        return *this;
+    }
+
+    Any &operator=(const Any &other)
+    {
+        if (other._content)
+        {
+            if (_content)
+            {
+                delete _content;
+            }
+            _content = other._content->clone();
+        }
+        return *this;
+    }
+
+    // 获取Any中的实际数据指针
+    template <class T>
+    T *get()
+    {
+        return &((PlaceHolder<T> *)_content)->_val;
+    }
+
+private:
+    class Holder
+    {
+    public:
+        virtual ~Holder() {};
+        virtual const std::type_info &type() = 0;
+        virtual Holder *clone() = 0;
+    };
+
+    template <class T>
+    class PlaceHolder : public Holder
+    {
+    public:
+        PlaceHolder(const T &val) : _val(val) {}
+
+        const std::type_info &type() // 返回类型
+        {
+            return typeid(T);
+        }
+        Holder *clone() // 克隆（深拷贝）一个新的指针
+        {
+            return new PlaceHolder(_val);
+        }
+
+    public:
+        T _val;
+    };
+
+private:
+    Holder *_content;
+};
+
 /*
 
     Buffer缓冲区模块
@@ -32,6 +121,20 @@ class Buffer
 public:
     Buffer(size_t size = DEFAULT_BUF_SIZE)
         : _buffer(size), _read_idx(0), _write_idx(0) {}
+
+    // 移动读指针
+    void moveReadIdx(size_t len)
+    {
+        assert(len <= readableBytes());
+        _read_idx += len;
+    }
+
+    //移动写指针
+    void moveWriteIdx(size_t len)
+    {
+        assert(len <= writeableBytes());
+        _write_idx += len;
+    }
 
     /// @brief 向缓冲区写入数据
     /// @param data 写入数据起始地址，统一转成void*就不用管类型
@@ -115,6 +218,12 @@ public:
         return _write_idx - _read_idx;
     }
 
+    // 获取可写数据大小
+    size_t writeableBytes()
+    {
+        return _buffer.size() - readableBytes();
+    }
+
     byte *begin()
     {
         return &_buffer[0];
@@ -142,7 +251,7 @@ private:
         }
 
         // 2.判断总体的剩余空间是否足够
-        if (_read_idx + backFreeSpace >= len)
+        if (writeableBytes() >= len)
         {
             std::cout << "挪动了一次数据" << std::endl;
             // 将数据挪到起始位置，读写偏移要跟着移动
@@ -471,7 +580,6 @@ public:
         // 任意事件发生
         if (_any_callback)
         {
-            DF_DEBUG("revents: %d", _revents);
             _any_callback();
         }
         // 可读事件发生 （正常地收到可读数据 or 对端关闭写端或连接时 or 收到带外数据）
@@ -771,6 +879,8 @@ private:
             return;
         }
         TimerPtr ptr = _idToTimer[id].lock();
+        DF_DEBUG("Timer %d is cancelled", id);
+        assert(ptr != nullptr);
         ptr->cancel();
     }
     // 清除定时任务
@@ -844,6 +954,11 @@ private:
     std::unique_ptr<Channel> _timer_channel; // timerfd的channel
 };
 
+/*
+
+    EventLoop：事件循环
+
+*/
 class EventLoop
 {
     using Task = std::function<void()>;
@@ -885,6 +1000,12 @@ public:
     {
         return std::this_thread::get_id() == _thread_id;
     }
+    
+    void assertInLoop()
+    {
+        assert(isInLoop() == true);
+    }
+
     // 在这个EventLoop中执行任务 （其它线程可调用）
     // EventLoop本线程任务：直接执行
     // 其它线程任务：压入任务队列
@@ -1014,6 +1135,324 @@ private:
     TimerWheel _timer_wheel;                 // 定时器
 };
 
+class Connection;
+using PtrConnection = std::shared_ptr<Connection>;
+typedef enum
+{
+    CLOSED,     // 已关闭
+    CONNECTED,  // 已连接：已完成各种设置，可进行通信
+    CLOSING,    // 关闭中：待关闭状态，缓冲区可能还有数据未处理
+    CONNECTING, // 连接中：待处理
+} ConnStat;
+
+class Connection : public std::enable_shared_from_this<Connection>
+{
+private:
+    uint64_t _conn_id;           // 连接的唯一标识ID
+    Socket _socket;              // 连接的套接字
+    ConnStat _status;            // 连接状态
+    Channel _channel;            // 连接事件管理
+    Buffer _in_buffer;           // 读缓冲区
+    Buffer _out_buffer;          // 写缓冲区
+    Any _context;                // 协议上下文
+    EventLoop *_looper;          // 连接所绑定的事件循环
+    bool _enable_inactive_close; // 是否启用连接空闲超时关闭
+
+    // using ClosedCallback = std::function<void(Connection*)>;
+    // 防止多线程对连接Connection进行操作时，多次释放导致野指针错误，这里对外提供的接口用shared_ptr智能指针操作连接
+
+    //外部回调函数
+    using ConnectionCallback = std::function<void(const PtrConnection &)>;
+    using MessageCallback = std::function<void(const PtrConnection &, Buffer &)>;
+    ConnectionCallback _closed_cb;        // 连接关闭回调函数
+    ConnectionCallback _connected_cb;     // 连接建立回调函数
+    ConnectionCallback _any_cb;           // 任意事件回调函数
+    MessageCallback _message_cb;          // 业务处理回调函数
+    ConnectionCallback _server_closed_cb; // 组件内部使用的连接关闭回调函数
+
+private:
+    // 对于连接的所有操作，都应该在EventLoop所在的线程中进行
+    // 发送数据
+    void sendInLoop(const char *data, size_t len)
+    {
+        if (_status == CLOSED || _status == CLOSING)
+        {
+            return;
+        }
+        // 向缓冲区写入数据
+        _out_buffer.write(data, len);
+        // 开启写事件监听
+        if (_channel.isWriteAble() == false)
+        {
+            _channel.enableWrite();
+        }
+    }
+    // 停止连接（要先检查缓冲区中是否还有数据待处理，再关闭连接）
+    void shutdownInLoop()
+    {
+        _status = CLOSING;
+        // 1.检查读缓冲区中是否还有数据待处理
+        if (_in_buffer.readableBytes() > 0)
+        {
+            // 有数据待处理，先处理完再关闭
+            handleClose();
+            return;
+        }
+        // 2.检查写缓冲区中是否还有数据待发送
+        if (_out_buffer.readableBytes() > 0)
+        {
+            // 有数据待发送，启动写事件监控，交给handleWrite发送完数据后再去关闭
+            _channel.enableWrite();
+        }
+        else
+        {
+            // 没有数据待发送，直接关闭
+            releaseInLoop();
+        }
+    }
+    // 释放连接（关闭连接）
+    void releaseInLoop()
+    {
+        // 0.设置连接状态为已关闭
+        _status = CLOSED;
+        // 1.移除描述符事件监控
+        _looper->removeEvent(&_channel);
+        // 2.关闭连接
+        _socket.Close();
+        // 3.如果开启了非活跃连接关闭，则取消
+        // if(_looper->hasTimer(_conn_id))
+        // {
+        //     disableInactiveCloseInLoop();
+        // }
+        // 4.调用连接关闭回调函数（用户）
+        if(_closed_cb)
+        {
+            _closed_cb(shared_from_this());
+        }
+        // 5.调用连接关闭回调函数（组件内部）
+        if(_server_closed_cb)
+        {
+            _server_closed_cb(shared_from_this());
+        }
+    }
+    // 连接获取后，描述符的设置，组件内的连接真正建立
+    void establishedInLoop()
+    {
+        assert(_status == CONNECTING);
+        // 1.设置连接状态
+        _status = CONNECTED;
+        // 2.启动读事件监控
+        _channel.enableRead();
+        // 3.调用连接建立回调函数
+        if (_connected_cb)
+        {
+            _connected_cb(shared_from_this());
+        }
+    }
+    // 开启非活跃连接关闭
+    void enableInactiveCloseInLoop(int sec)
+    {
+        if (_enable_inactive_close == false)
+        {
+            _enable_inactive_close = true;
+        }
+        // 如果当前连接已经有定时器，则重置定时器
+        if (_looper->hasTimer(_conn_id))
+        {
+            _looper->resetTimer(_conn_id);
+        }
+        // 如果定时器不存在，则添加定时器
+        else
+        {
+            _looper->addTimer(_conn_id, sec, std::bind(&Connection::releaseInLoop, this));
+        }
+    }
+    // 取消非活跃连接关闭
+    void disableInactiveCloseInLoop()
+    {
+        _enable_inactive_close = false;
+        _looper->cancelTimer(_conn_id);
+    }
+    // 切换协议上下文
+    void switchContextInLoop(const Any &context,
+                             const ConnectionCallback &closed_cb,
+                             const ConnectionCallback &connected_cb,
+                             const ConnectionCallback &any_cb,
+                             const MessageCallback &message_cb)
+    {
+        _context = context;
+        _closed_cb = closed_cb;
+        _connected_cb = connected_cb;
+        _any_cb = any_cb;
+        _message_cb = message_cb;
+    }
+
+    // 内部channel事件发生的回调函数
+    // 描述符可读事件发生
+    void handleRead()
+    {
+        // 1.把socket中的数据读到in_buffer中
+        char buf[65536]{};
+        ssize_t ret = _socket.NonBlockRecv(buf, sizeof(buf));
+        if (ret < 0)
+        {
+            // 读取失败，关闭连接（并不是真正的关闭，而要去看看写缓冲区中还有没有数据，有的话要先处理掉）
+            shutdownInLoop();
+            return;
+        }
+        _in_buffer.write(buf, ret);
+
+        // 2.调用业务处理回调函数
+        if (_in_buffer.readableBytes() > 0)
+        {
+            _message_cb(shared_from_this(), _in_buffer);
+        }
+    }
+    // 描述符可写事件发生
+    void handleWrite()
+    {
+        // 1.把out_buffer中的数据写到socket中
+        ssize_t ret = _socket.NonBlockSend(_out_buffer.readPos(), _out_buffer.readableBytes());
+        if (ret < 0)
+        {
+            // 写入失败，关闭连接
+            handleClose();
+            return;
+        }
+        // 2.数据写入成功，移动读指针
+        _out_buffer.moveReadIdx(ret);
+        // 3.数据写入成功，关闭写事件监控
+        if (_out_buffer.readableBytes() == 0)
+        {
+            _channel.disableWrite();
+            //如果当前连接是待关闭状态，则需要释放连接
+            if(_status == CLOSING)
+            {
+                releaseInLoop();
+            }
+        }
+    }
+    // 描述符关闭事件发生
+    void handleClose()
+    {
+        // 看看读缓冲区有没有需要处理的数据，然后再关闭
+        if (_in_buffer.readableBytes() > 0)
+        {
+            if (_message_cb)
+            {
+                _message_cb(shared_from_this(), _in_buffer);
+            }
+        }
+        releaseInLoop();
+    }
+    // 描述符错误事件发生
+    void handleError()
+    {
+        handleClose();
+    }
+    // 描述符任意事件发生
+    void handleAny()
+    {
+        // 1.刷新连接活跃度
+        if (_enable_inactive_close == true)
+        {
+            _looper->resetTimer(_conn_id);
+        }
+
+        // 2.调用组件使用者的任意事件回调函数
+        if (_any_cb)
+        {
+            _any_cb(shared_from_this());
+        }
+    }
+
+public:
+    Connection(EventLoop *looper, int sockfd, uint64_t conn_id)
+        : _conn_id(conn_id), _socket(sockfd), _status(CONNECTING), _looper(looper), _channel(sockfd, looper)
+        , _enable_inactive_close(false)
+    {
+        // 设置channel的回调函数
+        _channel.setReadCallback(std::bind(&Connection::handleRead, this));
+        _channel.setWriteCallback(std::bind(&Connection::handleWrite, this));
+        _channel.setErrorCallback(std::bind(&Connection::handleError, this));
+        _channel.setCloseCallback(std::bind(&Connection::handleClose, this));
+        _channel.setAnyCallback(std::bind(&Connection::handleAny, this));
+    }
+    ~Connection() 
+    {
+        DF_DEBUG("Connection destructed, id: %d", _conn_id);
+    }
+    int Fd() const//获取连接的描述符
+    {
+        return _socket.Fd();
+    }
+    int Id() const//获取连接的ID
+    {
+        return _conn_id;
+    }
+    void setContext(const Any &context)
+    {
+        _context = context;
+    }
+    Any *getContext()
+    {
+        return &_context;
+    }
+    void send(const char *data, size_t len) // 发送数据
+    {
+        _looper->runInLoop(std::bind(&Connection::sendInLoop, this, data, len));
+    }
+    void shutdown() // 关闭连接（并不实际关闭连接，需先判断缓冲区中是否还有数据）
+    {
+        _looper->runInLoop(std::bind(&Connection::shutdownInLoop, this));
+    }
+    void enableInactiveClose(int sec) // 启用连接空闲超时关闭
+    {
+        _looper->runInLoop(std::bind(&Connection::enableInactiveCloseInLoop, this, sec));
+    }
+    void disableInactiveClose() // 禁用连接空闲超时关闭
+    {
+        _looper->runInLoop(std::bind(&Connection::disableInactiveCloseInLoop, this));
+    }
+    void switchContext(const Any &context,
+                       const ConnectionCallback &closed_cb,
+                       const ConnectionCallback &connected_cb,
+                       const ConnectionCallback &any_cb,
+                       const MessageCallback &message_cb) // 切换协议上下文，需要更改回调函数 (必须在EventLoop线程立即执行)
+    {
+        _looper->assertInLoop();
+        _looper->runInLoop(std::bind(&Connection::switchContextInLoop, this,
+                                     context, closed_cb, connected_cb, any_cb, message_cb));
+    }
+
+    void setClosedCallback(const ConnectionCallback &cb) // 设置连接关闭回调函数
+    {
+        _closed_cb = cb;
+    }
+    void setConnectedCallback(const ConnectionCallback &cb) // 设置连接建立回调函数
+    {
+        _connected_cb = cb;
+    }
+    void setAnyCallback(const ConnectionCallback &cb) // 设置任意事件回调函数
+    {
+        _any_cb = cb;
+    }
+    void setMessageCallback(const MessageCallback &cb) // 设置业务处理回调函数
+    {
+        _message_cb = cb;
+    }
+    void setServerClosedCallback(const ConnectionCallback &cb) // 设置组件内部使用的连接关闭回调函数
+    {
+        _server_closed_cb = cb;
+    }
+
+    //连接建立就绪后，对Channel进行设置，启动读事件监控，调用连接建立回调函数connected_cb
+    void established()
+    {
+        _looper->runInLoop(std::bind(&Connection::establishedInLoop, this));
+    }
+};
+
 void Channel::update()
 {
     _looper->updateEvent(this);
@@ -1041,4 +1480,5 @@ void TimerWheel::cancelTimer(int id)
 {
     _looper->runInLoop(std::bind(&TimerWheel::cancelTimerInloop, this, id));
 }
+
 

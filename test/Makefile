@@ -1,10 +1,10 @@
-all: svr2 cli2
+all: svr3 cli3
 
-svr2: tcp_svr2.cc
-	g++ -o $@ $^ -std=c++14 -pthread
-cli2: tcp_cli2.cc
+svr3: tcp_svr3.cc
+	g++ -o $@ $^ -std=c++14 -pthread -g
+cli3: tcp_cli3.cc
 	g++ -o $@ $^ -std=c++14 -pthread
 
 .PHONY:
 clean:
-	rm svr2 cli2
+	rm svr3 cli3
