@@ -4,6 +4,9 @@
 uint64_t conn_id = 0;
 std::unordered_map<uint64_t, PtrConnection> conn_map;
 
+//从Reactor
+LoopThread conn_loop_thr;
+
 void OnConnected(const PtrConnection& conn)
 {
     DF_DEBUG("Connection constructed, id: %d", conn->Id());
@@ -12,6 +15,7 @@ void MessageHandler(const PtrConnection& conn, Buffer& buf)
 {
     //获取消息
     std::string msg = buf.readAsString(buf.readableBytes());
+    DF_DEBUG("收到消息: %s", msg.c_str());
     //回显消息
     std::string reply = "Hello, I am server, I recivce your msg : " + msg;
     conn->send(reply.c_str(), reply.size());
@@ -23,9 +27,10 @@ void DestroyConnection(const PtrConnection& conn)
     conn_map.erase(conn->Id());
 }
 
-void AcceptHandler(EventLoop* looper, int newfd)
+void AcceptHandler(int newfd)
 {
     ++conn_id;
+    EventLoop* looper = conn_loop_thr.getLoop();
     // 创建新连接的channel（注册到event loop中）
     PtrConnection conn = std::make_shared<Connection>(looper, newfd, conn_id);
     // 设置新连接各阶段的回调函数
@@ -61,13 +66,22 @@ void AcceptHandler(EventLoop* looper, int newfd)
 //     return 0;
 // }
 
+// int main()
+// {
+//     EventLoop looper;
+//     Acceptor acceptor(8888, &looper, std::bind(AcceptHandler, &looper, std::placeholders::_1));
+//     while (true)
+//     {
+//         looper.start();
+//     }
+//     return 0;
+// }
+
 int main()
 {
-    EventLoop looper;
-    Acceptor acceptor(8888, &looper, std::bind(AcceptHandler, &looper, std::placeholders::_1));
-    while (true)
-    {
-        looper.start();
-    }
+    EventLoop main_loop;
+    Acceptor acceptor(8888, &main_loop, std::bind(AcceptHandler, std::placeholders::_1));
+    DF_DEBUG("主循环已启动");
+    main_loop.start();
     return 0;
 }
