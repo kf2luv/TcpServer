@@ -1519,7 +1519,7 @@ public:
 
 /*
 
-    LoopThread: 循环线程
+    LoopThread: 事件循环线程
 
 */
 class LoopThread
@@ -1564,6 +1564,59 @@ public:
             _cond.wait(lock, [this] { return this->_looper != nullptr; });
             looper = _looper;
         }
+        return looper;
+    }
+};
+
+/*
+
+    LoopThreadPool: 事件循环线程池
+
+*/
+class LoopThreadPool
+{
+private:
+    size_t _thread_count = 0;           // 线程数量
+    size_t _rotate_idx = 0;             // rr轮转索引
+    std::vector<LoopThread *> _threads; // 管理所有的LoopThread线程对象
+    std::vector<EventLoop *> _loopers;  // 每个从属线程中Looper (_thread_count>0 时有用)
+    EventLoop *_base_looper = nullptr;  // 主线程Looper(_thread_count==0 时有用)
+public:
+    LoopThreadPool(EventLoop *base_looper) : _base_looper(base_looper) {}
+    ~LoopThreadPool() {}
+
+    // 设置线程数量
+    void setThreadCount(size_t count)
+    {
+        _thread_count = count;
+    }
+    // 启动所有线程
+    void start()
+    {
+        if (_thread_count == 0)
+        {
+            return;
+        }
+        _threads.resize(_thread_count);
+        _loopers.resize(_thread_count);
+        for (size_t i = 0; i < _thread_count; i++)
+        {
+            _threads[i] = new LoopThread;
+            _loopers[i] = _threads[i]->getLoop();
+        }
+    }
+    // 为用户分配一个EventLoop
+    EventLoop *assignLoop()
+    {
+        if (_thread_count == 0)
+        {
+            //如果是0个，单Reactor模型，连接获取和业务处理都在主线程的 EventLoop 中进行
+            return _base_looper;
+        }
+        EventLoop *looper = _loopers[_rotate_idx];
+        DF_DEBUG("分配了Eventloop %d 号, %p", _rotate_idx, looper);
+
+        _rotate_idx = (_rotate_idx + 1) % _thread_count;
         return looper;
     }
 };

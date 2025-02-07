@@ -5,7 +5,12 @@ uint64_t conn_id = 0;
 std::unordered_map<uint64_t, PtrConnection> conn_map;
 
 //从Reactor
-LoopThread conn_loop_thr;
+// LoopThread conn_loop_thr;
+
+//主Reactor
+EventLoop base_loop;
+//从Reactor池
+LoopThreadPool loop_thread_pool(&base_loop);
 
 void OnConnected(const PtrConnection& conn)
 {
@@ -30,7 +35,7 @@ void DestroyConnection(const PtrConnection& conn)
 void AcceptHandler(int newfd)
 {
     ++conn_id;
-    EventLoop* looper = conn_loop_thr.getLoop();
+    EventLoop* looper = loop_thread_pool.assignLoop();
     // 创建新连接的channel（注册到event loop中）
     PtrConnection conn = std::make_shared<Connection>(looper, newfd, conn_id);
     // 设置新连接各阶段的回调函数
@@ -77,11 +82,22 @@ void AcceptHandler(int newfd)
 //     return 0;
 // }
 
+// int main()
+// {
+//     EventLoop main_loop;
+//     Acceptor acceptor(8888, &main_loop, std::bind(AcceptHandler, std::placeholders::_1));
+//     DF_DEBUG("主循环已启动");
+//     main_loop.start();
+//     return 0;
+// }
+
 int main()
 {
-    EventLoop main_loop;
-    Acceptor acceptor(8888, &main_loop, std::bind(AcceptHandler, std::placeholders::_1));
+    loop_thread_pool.setThreadCount(3);
+    loop_thread_pool.start();
+
+    Acceptor acceptor(8888, &base_loop, std::bind(AcceptHandler, std::placeholders::_1));
     DF_DEBUG("主循环已启动");
-    main_loop.start();
+    base_loop.start();
     return 0;
 }
