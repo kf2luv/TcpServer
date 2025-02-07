@@ -1027,7 +1027,7 @@ public:
         }
         else
         {
-            DF_DEBUG("有一个其它线程的任务到来，压入任务队列");
+            // DF_DEBUG("有一个其它线程的任务到来，压入任务队列");
             cacheTask(cb);
         }
     }
@@ -1252,7 +1252,7 @@ private:
         }
     }
     // 连接获取后，描述符的设置，组件内的连接真正建立
-    void establishedInLoop()
+    void establishedInLoop() 
     {
         assert(_status == CONNECTING);
         // 1.设置连接状态
@@ -1282,7 +1282,7 @@ private:
         {
             _looper->addTimer(_conn_id, sec, std::bind(&Connection::releaseInLoop, this));
         }
-        DF_DEBUG("非活跃连接超时关闭--已启动!");
+        // DF_DEBUG("非活跃连接超时关闭--已启动!");
     }
     // 取消非活跃连接关闭
     void disableInactiveCloseInLoop()
@@ -1614,10 +1614,119 @@ public:
             return _base_looper;
         }
         EventLoop *looper = _loopers[_rotate_idx];
-        DF_DEBUG("分配了Eventloop %d 号, %p", _rotate_idx, looper);
+        // DF_DEBUG("分配了Eventloop %d 号, %p", _rotate_idx, looper);
 
         _rotate_idx = (_rotate_idx + 1) % _thread_count;
         return looper;
+    }
+};
+
+class TcpServer
+{
+private:
+    size_t _id = 100;         // 自增长的ID，用于连接编号和定时任务编号
+    EventLoop _base_looper; // 主线程的事件循环
+    Acceptor _acceptor;     // 监听连接管理 (在构造函数中实例化，因此初始化列表必须在_base_looper之后，才能确保能挂载到其上)
+
+    LoopThreadPool _loop_pool;                        // 事件循环线程池
+    std::unordered_map<int, PtrConnection> _conn_map; // 连接管理
+
+    bool _enable_inactive_close = false; // 是否启用连接空闲超时关闭
+    int _timeout = 0;                    // 连接空闲超时时间
+
+    using ConnectionCallback = std::function<void(const PtrConnection &)>;
+    using MessageCallback = std::function<void(const PtrConnection &, Buffer &)>;
+    ConnectionCallback _closed_cb;    // 连接关闭回调函数
+    ConnectionCallback _connected_cb; // 连接建立回调函数
+    ConnectionCallback _any_cb;       // 任意事件回调函数
+    MessageCallback _message_cb;      // 业务处理回调函数
+private:
+    // 新连接处理函数（设置为_acceptor的读回调）
+    void acceptHandler(int newfd)
+    {
+        DF_DEBUG("获取到一个新连接, 描述符fd: %d", newfd);
+        // 1.创建一个新的连接对象conn
+        PtrConnection conn = std::make_shared<Connection>(_loop_pool.assignLoop(), newfd, _id++);
+        // 2.为新连接设置回调函数
+        // 事件发生时，在conn所在的EventLoop线程中执行
+        conn->setClosedCallback(_closed_cb);
+        conn->setConnectedCallback(_connected_cb);
+        conn->setAnyCallback(_any_cb);
+        conn->setMessageCallback(_message_cb);
+        // 需要删除服务器中的连接时，应该在base_loop中执行，确保线程安全
+        conn->setServerClosedCallback(std::bind(&TcpServer::removeConnection, this, std::placeholders::_1));
+
+        // 3.是否开启非活跃连接自动关闭
+        if (_enable_inactive_close == true)
+        {
+            conn->enableInactiveClose(_timeout);
+        }
+        // 4.连接准备就绪，创建完成
+        conn->established();
+        // 5.将新连接加入连接管理
+        _conn_map[conn->Id()] = conn;
+    }
+
+    // 移除连接（服务器内部，移除连接的最后一步）
+    // 连接Connection的本体保存由主EventLoop管理，因此只能在主EventLoop中移除，否则会出现线程安全问题
+    void removeConnection(const PtrConnection &conn)
+    {
+        _base_looper.runInLoop(std::bind(&TcpServer::removeConnectionInBaseLoop, this, conn));
+    }
+
+    void removeConnectionInBaseLoop(const PtrConnection &conn)
+    {
+        auto it = _conn_map.find(conn->Id());
+        if (it != _conn_map.end())
+        {
+            _conn_map.erase(it);
+        }
+    }
+
+    void runAfterInBaseLoop(int sec, const TimerTask::Task &cb)
+    {
+        _base_looper.addTimer(_id++, sec, cb);
+    }
+
+public:
+    // 给一个端口号，创建Tcp服务器
+    TcpServer(uint16_t port)
+        :_loop_pool(&_base_looper) 
+        ,_acceptor(port, &_base_looper, std::bind(&TcpServer::acceptHandler, this, std::placeholders::_1))
+    {}
+
+    void setThreadCount(size_t count) // 设置线程数量
+    {
+        _loop_pool.setThreadCount(count);
+    }
+
+    void setMessageCallback(const MessageCallback &cb) { _message_cb = cb; }        // 设置业务处理回调函数
+    void setConnectedCallback(const ConnectionCallback &cb) { _connected_cb = cb; } // 设置连接建立回调函数
+    void setClosedCallback(const ConnectionCallback &cb) { _closed_cb = cb; }       // 设置连接关闭回调函数
+    void setAnyCallback(const ConnectionCallback &cb) { _any_cb = cb; }             // 设置任意事件回调函数
+
+    // 启用连接空闲超时关闭
+    void enableInactiveClose(int sec)
+    {
+        _enable_inactive_close = true;
+        _timeout = sec;
+    }
+
+    // 添加一个定时任务到主循环线程中
+    // 用户设置的定时任务由主EventLoop管理，如果让其它线程设置，就会存在线程安全问题
+    // 因此这里只能在主EventLoop线程中设置
+    void runAfter(int sec, const TimerTask::Task &cb)
+    {
+        _base_looper.runInLoop(std::bind(&TcpServer::runAfterInBaseLoop, this, sec, cb));
+    }
+
+    void start()
+    {
+        DF_DEBUG("服务器启动");
+        // 设置并启动从属线程池 (必须设置过数量后)
+        _loop_pool.start();
+        // 启动主线程的事件循环
+        _base_looper.start();
     }
 };
 
@@ -1650,3 +1759,5 @@ void TimerWheel::cancelTimer(int id)
 }
 
 
+// TODO
+// class NetWork 
