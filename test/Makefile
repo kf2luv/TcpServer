@@ -1,7 +1,7 @@
 all: svr3 cli3
 
 svr3: tcp_svr3.cc
-	g++ -o $@ $^ -std=c++14 -pthread -g
+	g++ -o $@ $^ -std=c++14 -pthread
 cli3: tcp_cli3.cc
 	g++ -o $@ $^ -std=c++14 -pthread
 

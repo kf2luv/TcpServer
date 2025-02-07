@@ -436,7 +436,7 @@ public:
         return Send(buf, len, MSG_DONTWAIT);
     }
 
-    // 创建一个server连接
+    // 创建一个server连接 (listen套接字)
     bool CreateServer(const uint16_t &port, const std::string &ip = "0.0.0.0")
     {
         return Create() && SetNonBlock() && SetAddrReuse() && Bind(ip, port) && Listen();
@@ -628,7 +628,7 @@ private:
     EventCallback _close_callback;
     EventCallback _any_callback;
 
-    EventLoop *_looper; // 事件监控器(后续改为EventLoop)
+    EventLoop *_looper = nullptr; // 事件监控器(后续改为EventLoop)
 };
 
 /*
@@ -768,14 +768,15 @@ public:
         {
             // 如果没有被取消，析构时执行任务
             _callback();
-            _release();
         }
+        //不管有没有被取消，该定时器任务都要释放，以防后续访问到空指针
+        _release();
     }
     void setRelease(const Release &release)
     {
         _release = release;
     }
-    int timeout() const
+    int timeout()
     {
         return _timeout;
     }
@@ -867,6 +868,7 @@ private:
 
         // 根据id所指的weak_ptr，获取一个新的shared_ptr
         TimerPtr ptr = _idToTimer[id].lock();
+        assert(ptr != nullptr);
 
         // 新的shared_ptr 存入时间轮
         int pos = (_tick + ptr->timeout()) % MAX_TIMEOUT;
@@ -880,8 +882,10 @@ private:
         }
         TimerPtr ptr = _idToTimer[id].lock();
         DF_DEBUG("Timer %d is cancelled", id);
-        assert(ptr != nullptr);
-        ptr->cancel();
+        if (ptr)
+        {
+            ptr->cancel();
+        }
     }
     // 清除定时任务
     void removeTimer(int id)
@@ -890,6 +894,7 @@ private:
         {
             return;
         }
+        DF_DEBUG("Timer %d is removed", id);
         _idToTimer.erase(id);
     }
 
@@ -985,9 +990,9 @@ public:
         // 2.事件处理
         if (!actives.empty())
         {
-            for (auto &a : actives)
+            for (auto &active_channel : actives)
             {
-                a->handleEvent();
+                active_channel->handleEvent();
             }
         }
 
@@ -1125,9 +1130,9 @@ private:
     }
 
 private:
-    std::thread::id _thread_id;                 // 事件循环所在线程id
-    int _eventfd;                           // 用于唤醒IO事件监听阻塞
-                                                // （向eventfd计数器写入，就有了一个读事件，就可以唤醒了），先去执行任务
+    std::thread::id _thread_id;              // 事件循环所在线程id
+    int _eventfd;                            // 用于唤醒IO事件监听阻塞
+                                             // （向eventfd计数器写入，就有了一个读事件，就可以唤醒了），先去执行任务
     std::unique_ptr<Channel> _event_channel; // eventfd对应的channel
     Poller _poller;                          // 事件监听器
     std::vector<Task> _tasks;                // 任务池
@@ -1220,11 +1225,11 @@ private:
         // 2.关闭连接
         _socket.Close();
         // 3.如果开启了非活跃连接关闭，则取消
-        // if(_looper->hasTimer(_conn_id))
-        // {
-        //     disableInactiveCloseInLoop();
-        // }
-        // 4.调用连接关闭回调函数（用户）
+        if(_enable_inactive_close == true)
+        {
+            disableInactiveCloseInLoop();
+        }
+        // 4.调用连接关闭回调函数（用户设定）
         if(_closed_cb)
         {
             _closed_cb(shared_from_this());
@@ -1243,7 +1248,7 @@ private:
         _status = CONNECTED;
         // 2.启动读事件监控
         _channel.enableRead();
-        // 3.调用连接建立回调函数
+        // 3.调用连接建立回调函数（用户设定）
         if (_connected_cb)
         {
             _connected_cb(shared_from_this());
@@ -1261,7 +1266,7 @@ private:
         {
             _looper->resetTimer(_conn_id);
         }
-        // 如果定时器不存在，则添加定时器
+        // 如果定时器不存在，则添加释放连接的定时任务
         else
         {
             _looper->addTimer(_conn_id, sec, std::bind(&Connection::releaseInLoop, this));
@@ -1353,13 +1358,13 @@ private:
     // 描述符任意事件发生
     void handleAny()
     {
-        // 1.刷新连接活跃度
+        // 刷新连接活跃度
         if (_enable_inactive_close == true)
         {
             _looper->resetTimer(_conn_id);
         }
 
-        // 2.调用组件使用者的任意事件回调函数
+        // 调用组件使用者的任意事件回调函数
         if (_any_cb)
         {
             _any_cb(shared_from_this());
@@ -1452,6 +1457,55 @@ public:
         _looper->runInLoop(std::bind(&Connection::establishedInLoop, this));
     }
 };
+
+/*
+
+    Acceptor: 监听连接管理
+
+*/
+class Acceptor
+{
+    using AcceptCallback = std::function<void(int fd)>;
+
+private:
+    Socket _listen_socket;             // 监听套接字
+    std::unique_ptr<Channel> _channel; // 事件管理，监听读事件
+    AcceptCallback _accept_cb;         // 收到新连接后的回调函数
+    EventLoop *_looper;                // 绑定的事件循环
+private:
+    //监听套接字可读事件发生的回调函数
+    void handleRead()
+    {
+        // 获取新连接的描述符
+        int newfd = _listen_socket.Accept();
+        if(newfd == -1)
+        {
+            DF_ERROR("监听套接字异常");
+            abort();
+        }
+        // 调用用户设置的回调函数，对新连接进行处理
+        if(_accept_cb)
+        {
+            _accept_cb(newfd);
+        }
+    }
+public:
+    Acceptor(uint32_t port, EventLoop *looper, const AcceptCallback &accept_cb)
+        : _accept_cb(accept_cb), _looper(looper)
+    {
+        bool ret = _listen_socket.CreateServer(port);
+        assert(ret == true);
+        // 设置Channel
+        _channel = std::move(std::make_unique<Channel>(_listen_socket.Fd(), _looper));
+        // 设置读事件触发的回调函数
+        _channel->setReadCallback(std::bind(&Acceptor::handleRead, this));
+        // 开启读事件监控（开始新连接监听）
+        _channel->enableRead();
+    }
+};
+
+
+
 
 void Channel::update()
 {
