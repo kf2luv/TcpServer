@@ -128,8 +128,6 @@ Any类是一个可以接收并保存任意类型数据的容器，并且保存�
 2. 移除描述符的监控； 
 3. 开始监控
 
-
-
 `Channel`与`Poller`的联调测试
 
 ![image-20250128031422964](https://ckfs.oss-cn-beijing.aliyuncs.com/img/202501280314058.png)
@@ -163,3 +161,98 @@ Any类是一个可以接收并保存任意类型数据的容器，并且保存�
 `EventLoop`与各个模块整合为简单`TcpServer`关系图
 
 ![image-20250205234447550](https://ckfs.oss-cn-beijing.aliyuncs.com/img/202502052344747.png)
+
+ 
+
+
+
+## Connection
+
+`Connection`**是连接管理模块，对一个连接进行全方位的管理：**
+
+1. 套接字的管理 `Socket`
+2. 连接的事件管理 `Channel`
+3. 输入缓冲区和输出缓冲区的管理 `Buffer`
+4. 协议上下文的管理 `Any`
+5. 用户回调函数的管理
+
+用户回调函数设定连接在不同状态下需要处理的任务，如：群聊服务器中，用户上线时（连接建立成功），向其他用户群发该用户上线通知。
+
+`Connection`**提供的功能：**
+
+1. 发送数据（实际是先将数据拷贝到发送缓冲区中，并开启写事件监控，等到写事件就绪时再向套接字写入数据）
+2. 接收数据
+3. 设置回调函数
+4. 关闭连接
+5. 启动非活跃连接超时断开
+6. 取消非活跃连接超时断开
+
+![image-20250207140426242](https://ckfs.oss-cn-beijing.aliyuncs.com/img/202502071404307.png)
+
+
+
+## Acceptor
+
+对**监听套接字**进行管理，功能如下：
+
+1. 创建一个监听套接字`ListenSocket`
+2. 启动读事件监控，开始监听
+3. 读事件触发，获取到新连接
+4. 调用上层设置的回调函数，对新连接进行处理
+
+
+
+## LoopThread
+
+事件循环线程，`EventLoop`的工作线程，一个`EventLoop`工作在一个`LoopThread`中。
+
+`LoopThread`的功能：
+
+1. 在线程内实例化一个`EventLoop`，保证每个`EventLoop`实例化时就绑定一个唯一的线程ID
+2. 启动`EventLoop`
+3. 提供一个外部获取`EventLoop`的接口，
+
+`LoopThread`对象一旦实例化，其内部便创建并启动了一个**事件循环**线程，并为外部提供了一个获取内部`EventLoop`的接口。`LoopThread`是外部操作这个线程的句柄。
+
+
+
+## LoopThreadPool
+
+事件循环线程池，用于对`LoopThread`进行管理和操作，功能如下：
+
+1. **线程数量可配置**，支持0个或多个`LoopThread`。如果是0个，代表没有**从属线程**（单Reactor模型），连接获取和业务处理都在**主线程**的`EventLoop`中进行。
+2. **管理**创建出来的`LoopThread`及其`EventLoop`，并维护一个主线程的`EventLoop`，以支持单Reactor模型。
+3. **线程分配功能**：多Reactor模型中，当主线程接收到一个新连接，需要将新连接挂载到某个从属线程的`EventLoop`上，进行事件监控与处理，由`LoopThreadPool`分配这个从属线程（这里先采用简单的**RR轮转**策略分配线程，后面考虑优化）。单Reactor模型中，新连接直接由主线程的`EventLoop`处理。
+
+
+
+## TcpServer
+
+`TcpServer`整合模块，对所有功能子模块进行封装，其组成如下：
+
+1. 自增长的连接ID，为每一个新连接分配一个唯一的ID
+2. 一个监听管理套接字管理`accpetor`
+3. 主线程事件循环`base_loop`，主要用于监听事件的监控
+4. `loop_thread_pool`从线程池，管理所有的从属线程
+5. 管理所有的连接`conn_map`
+6. 各种回调函数（消息回调，连接建立回调，连接关闭回调，任意事件回调），由上层设置
+
+功能：
+
+1. 设置管理的从属线程数量
+2. 设置各种回调函数（消息业务处理回调，连接建立回调，连接关闭回调，任意事件回调）
+3. 开启空闲连接超时关闭
+4. 添加一个定时任务（主线程事件循环中执行）
+5. 启动服务器
+
+`TcpServer`逻辑框图
+
+![image-20250208023506491](https://ckfs.oss-cn-beijing.aliyuncs.com/img/202502080235553.png)
+
+
+
+*Bug Record：*
+
+![image-20250208013752754](https://ckfs.oss-cn-beijing.aliyuncs.com/img/202502080137821.png)
+
+> epoll错误，fd=3是刚开始分配的第一个描述符，所以去查看初始化服务器时，需要分配描述符的操作，发现TcpServer中代码出错，fd=3是acceptor的描述符，而acceptor在base_looper之前创建，无法找到挂载的EventLoop，因此出错。解决方法：在TcpServer的初始化列表中，调转acceptor和base_looper的顺序

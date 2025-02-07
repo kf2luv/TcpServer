@@ -1160,7 +1160,6 @@ typedef enum
     CLOSING,    // 关闭中：待关闭状态，缓冲区可能还有数据未处理
     CONNECTING, // 连接中：待处理
 } ConnStat;
-
 class Connection : public std::enable_shared_from_this<Connection>
 {
 private:
@@ -1522,6 +1521,7 @@ public:
     LoopThread: 事件循环线程
 
 */
+
 class LoopThread
 {
 private:
@@ -1567,6 +1567,7 @@ public:
         return looper;
     }
 };
+
 
 /*
 
