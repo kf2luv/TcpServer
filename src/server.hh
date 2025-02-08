@@ -216,13 +216,13 @@ public:
     }
 
     // 获取可读数据大小
-    size_t readableBytes()
+    size_t readableBytes() const
     {
         return _write_idx - _read_idx;
     }
 
     // 获取可写数据大小
-    size_t writeableBytes()
+    size_t writeableBytes() const
     {
         return _buffer.size() - readableBytes();
     }
