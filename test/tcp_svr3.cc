@@ -109,10 +109,6 @@ int main()
     // server.enableInactiveClose(6);
     server.setMessageCallback(MessageHandler);
     server.setConnectedCallback(OnConnected);
-
-    server.runAfter(3, []() {
-        DF_DEBUG("3秒后执行的任务");
-    });
     server.start();
 
     return 0;

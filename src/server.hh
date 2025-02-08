@@ -1,3 +1,4 @@
+#pragma once
 #include <iostream>
 #include <vector>
 #include <algorithm>
@@ -379,6 +380,7 @@ public:
         if (_sockfd >= 0)
         {
             close(_sockfd);
+            // DF_DEBUG("关闭了描述符fd: %d", _sockfd);
             _sockfd = -1;
         }
     }
@@ -402,7 +404,12 @@ public:
                 return 0;
             }
             // 接收出错 or 连接断开，不能重新接收数据，返回-1
-            DF_ERROR("Recv from fd-%d failed: %s", _sockfd, strerror(errno));
+            DF_ERROR("Recv from fd-%d failed: %s", _sockfd, strerror(errno));//为什么连接断开，还会报这个错误？
+            // printf("Recv from fd-%d failed: %s", _sockfd, strerror(errno));
+            if(ret == 0)
+            {
+                DF_DEBUG("连接%d被挂断了", _sockfd);
+            }
             return -1;
         }
         // 数据接收成功
@@ -419,7 +426,7 @@ public:
     {
         assert(buf != nullptr);
         ssize_t ret = send(_sockfd, buf, len, flags);
-        if (ret < 0)
+        if (ret <= 0)
         {
             // 可以重新发送数据，返回0
             if (errno == EAGAIN || errno == EINTR)
@@ -1186,11 +1193,93 @@ private:
     ConnectionCallback _server_closed_cb; // 组件内部使用的连接关闭回调函数
 
 private:
+    // 内部channel事件发生的回调函数
+    // 描述符可读事件发生
+    void handleRead()
+    {
+        // 1.把socket中的数据读到in_buffer中
+        char buf[65536]{};
+        ssize_t ret = _socket.NonBlockRecv(buf, sizeof(buf));
+        if (ret < 0)
+        {
+            DF_DEBUG("连接%d被挂断了, 尝试关闭连接", _socket.Fd());
+            // 读取失败，关闭连接（并不是真正的关闭，而要去看看写缓冲区中还有没有数据，有的话要先处理掉）
+            // shutdown();
+            handleClose();
+            return;
+        }
+        _in_buffer.write(buf, ret);
+
+        // 2.调用业务处理回调函数
+        if (_in_buffer.readableBytes() > 0)
+        {
+            _message_cb(shared_from_this(), _in_buffer);
+        }
+    }
+    // 描述符可写事件发生
+    void handleWrite()
+    {
+        DF_DEBUG("连接%d可写事件发生", _socket.Fd());
+        // 1.把out_buffer中的数据写到socket中
+        ssize_t ret = _socket.NonBlockSend(_out_buffer.readPos(), _out_buffer.readableBytes());
+        if (ret < 0)
+        {
+            // 写入失败，关闭连接
+            handleClose();
+            return;
+        }
+        // 2.数据写入成功，移动读指针
+        _out_buffer.moveReadIdx(ret);
+        // 3.数据写入成功，关闭写事件监控
+        if (_out_buffer.readableBytes() == 0)
+        {
+            _channel.disableWrite();
+            //如果当前连接是待关闭状态，则需要释放连接
+            if(_status == CLOSING)
+            {
+                release();
+            }
+        }
+    }
+    // 描述符关闭事件发生
+    void handleClose()
+    {
+        // 看看读缓冲区有没有需要处理的数据，然后再关闭
+        if (_in_buffer.readableBytes() > 0)
+        {
+            if (_message_cb)
+            {
+                _message_cb(shared_from_this(), _in_buffer);
+            }
+        }
+        release();
+    }
+    // 描述符错误事件发生
+    void handleError()
+    {
+        handleClose();
+    }
+    // 描述符任意事件发生
+    void handleAny()
+    {
+        // 刷新连接活跃度
+        if (_enable_inactive_close == true)
+        {
+            _looper->resetTimer(_conn_id);
+        }
+
+        // 调用组件使用者的任意事件回调函数
+        if (_any_cb)
+        {
+            _any_cb(shared_from_this());
+        }
+    }
+
     // 对于连接的所有操作，都应该在EventLoop所在的线程中进行
     // 发送数据
     void sendInLoop(const char *data, size_t len)
     {
-        if (_status == CLOSED || _status == CLOSING)
+        if (_status == CLOSED)
         {
             return;
         }
@@ -1206,24 +1295,33 @@ private:
     void shutdownInLoop()
     {
         _status = CLOSING;
-        // 1.检查读缓冲区中是否还有数据待处理
+        // 1.检查读缓冲区中是否还有数据待处理，有的话先处理完
         if (_in_buffer.readableBytes() > 0)
         {
-            // 有数据待处理，先处理完再关闭
-            handleClose();
-            return;
+            DF_DEBUG("连接%d还有数据待处理, 先处理完再关闭", _socket.Fd());
+            if (_message_cb)
+            {
+                _message_cb(shared_from_this(), _in_buffer);
+            }
         }
         // 2.检查写缓冲区中是否还有数据待发送
         if (_out_buffer.readableBytes() > 0)
         {
+            DF_DEBUG("连接%d有数据待发送, 启动写事件监控", _socket.Fd());
             // 有数据待发送，启动写事件监控，交给handleWrite发送完数据后再去关闭
             _channel.enableWrite();
         }
         else
         {
+            DF_DEBUG("连接%d没有数据待发送, 直接关闭", _socket.Fd());
             // 没有数据待发送，直接关闭
-            releaseInLoop();
+            release();
         }
+        // // 写缓冲区没有数据了，关闭
+        // if (_out_buffer.readableBytes() == 0)
+        // {
+        //     releaseInLoop();
+        // }
     }
     // 释放连接（关闭连接）
     void releaseInLoop()
@@ -1303,85 +1401,6 @@ private:
         _message_cb = message_cb;
     }
 
-    // 内部channel事件发生的回调函数
-    // 描述符可读事件发生
-    void handleRead()
-    {
-        // 1.把socket中的数据读到in_buffer中
-        char buf[65536]{};
-        ssize_t ret = _socket.NonBlockRecv(buf, sizeof(buf));
-        if (ret < 0)
-        {
-            // 读取失败，关闭连接（并不是真正的关闭，而要去看看写缓冲区中还有没有数据，有的话要先处理掉）
-            shutdownInLoop();
-            return;
-        }
-        _in_buffer.write(buf, ret);
-
-        // 2.调用业务处理回调函数
-        if (_in_buffer.readableBytes() > 0)
-        {
-            _message_cb(shared_from_this(), _in_buffer);
-        }
-    }
-    // 描述符可写事件发生
-    void handleWrite()
-    {
-        // 1.把out_buffer中的数据写到socket中
-        ssize_t ret = _socket.NonBlockSend(_out_buffer.readPos(), _out_buffer.readableBytes());
-        if (ret < 0)
-        {
-            // 写入失败，关闭连接
-            handleClose();
-            return;
-        }
-        // 2.数据写入成功，移动读指针
-        _out_buffer.moveReadIdx(ret);
-        // 3.数据写入成功，关闭写事件监控
-        if (_out_buffer.readableBytes() == 0)
-        {
-            _channel.disableWrite();
-            //如果当前连接是待关闭状态，则需要释放连接
-            if(_status == CLOSING)
-            {
-                releaseInLoop();
-            }
-        }
-    }
-    // 描述符关闭事件发生
-    void handleClose()
-    {
-        // 看看读缓冲区有没有需要处理的数据，然后再关闭
-        if (_in_buffer.readableBytes() > 0)
-        {
-            if (_message_cb)
-            {
-                _message_cb(shared_from_this(), _in_buffer);
-            }
-        }
-        releaseInLoop();
-    }
-    // 描述符错误事件发生
-    void handleError()
-    {
-        handleClose();
-    }
-    // 描述符任意事件发生
-    void handleAny()
-    {
-        // 刷新连接活跃度
-        if (_enable_inactive_close == true)
-        {
-            _looper->resetTimer(_conn_id);
-        }
-
-        // 调用组件使用者的任意事件回调函数
-        if (_any_cb)
-        {
-            _any_cb(shared_from_this());
-        }
-    }
-
 public:
     Connection(EventLoop *looper, int sockfd, uint64_t conn_id)
         : _conn_id(conn_id), _socket(sockfd), _status(CONNECTING), _looper(looper), _channel(sockfd, looper)
@@ -1439,6 +1458,12 @@ public:
         _looper->assertInLoop();
         _looper->runInLoop(std::bind(&Connection::switchContextInLoop, this,
                                      context, closed_cb, connected_cb, any_cb, message_cb));
+    }
+
+    // 释放连接
+    void release()
+    {
+        _looper->runInLoop(std::bind(&Connection::releaseInLoop, this));
     }
     // 连接建立就绪后，对Channel进行设置，启动读事件监控，调用连接建立回调函数connected_cb
     void established()
@@ -1625,7 +1650,7 @@ public:
 class TcpServer
 {
 private:
-    size_t _id = 100;         // 自增长的ID，用于连接编号和定时任务编号
+    int _id = 100;         // 自增长的ID，用于连接编号和定时任务编号
     EventLoop _base_looper; // 主线程的事件循环
     Acceptor _acceptor;     // 监听连接管理 (在构造函数中实例化，因此初始化列表必须在_base_looper之后，才能确保能挂载到其上)
 

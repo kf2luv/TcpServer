@@ -67,6 +67,7 @@
         "strstream": "cpp",
         "codecvt": "cpp",
         "cfenv": "cpp",
-        "*.ipp": "cpp"
+        "*.ipp": "cpp",
+        "cerrno": "cpp"
     }
 }
