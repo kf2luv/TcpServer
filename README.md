@@ -251,8 +251,76 @@ Any类是一个可以接收并保存任意类型数据的容器，并且保存�
 
 
 
-*Bug Record：*
+*Bug Record1：*
 
 ![image-20250208013752754](https://ckfs.oss-cn-beijing.aliyuncs.com/img/202502080137821.png)
 
 > epoll错误，fd=3是刚开始分配的第一个描述符，所以去查看初始化服务器时，需要分配描述符的操作，发现TcpServer中代码出错，fd=3是acceptor的描述符，而acceptor在base_looper之前创建，无法找到挂载的EventLoop，因此出错。解决方法：在TcpServer的初始化列表中，调转acceptor和base_looper的顺序
+
+
+
+*Bug Record2*
+
+使用webbench对基于TcpServer设计的EchoServer进行压力测试，发现**webbench测试时间一到，客户端主动与server断开连接后**，server并不能正确地关闭连接，而是报如下错误：
+
+![image-20250209014932864](https://ckfs.oss-cn-beijing.aliyuncs.com/img/202502090149002.png)
+
+此时系统的CPU占用率如下，可见被server进程消耗了非常多资源，但又没有客户端连接，浪费在哪？
+
+![image-20250209015133859](https://ckfs.oss-cn-beijing.aliyuncs.com/img/202502090151921.png)
+
+排查与解决思路：
+
+![image-20250209020303342](https://ckfs.oss-cn-beijing.aliyuncs.com/img/202502090203423.png)
+
+**鉴定为对连接挂断时，缓冲区尚存数据的处理不当，导致服务端一直没有关闭已经无效的连接，而且读事件（对端关闭）一直通知（epoll水平模式），服务端一直做无效的处理，大大浪费CPU资源，合理的做法应该是：**
+
+- 客户端主动断开连接，in_buffer还有数据的话就先处理，out_buffer还有数据就丢弃（因为发不出去了）
+- 服务端主动断开连接，in_buffer还有数据的话就先处理，out_buffer还有数据就先发送
+
+因此，在`handleRead`中读取数据时发现是对端关闭了连接，就应该以看看`in_buffer`中还有没有数据，有的话处理，然后就直接关闭连接，不用管`out_buffer`（这是`handleClose`的逻辑，可直接调用）
+
+```cpp
+// 描述符可读事件发生
+void handleRead()
+{
+    // 1.把socket中的数据读到in_buffer中
+    char buf[65536]{};
+    ssize_t ret = _socket.NonBlockRecv(buf, sizeof(buf));
+    if (ret < 0)
+    {
+        DF_DEBUG("连接fd: %d 被挂断了, 尝试关闭连接", _socket.Fd());
+        // 读取失败，关闭连接
+        // shutdown();
+        handleClose();
+        return;
+    }
+    _in_buffer.write(buf, ret);
+
+    // 2.调用业务处理回调函数
+    if (_in_buffer.readableBytes() > 0)
+    {
+        _message_cb(shared_from_this(), _in_buffer);
+    }
+}
+// 描述符关闭事件发生
+void handleClose()
+{
+    // 看看读缓冲区有没有需要处理的数据，然后再关闭
+    if (_in_buffer.readableBytes() > 0)
+    {
+        if (_message_cb)
+        {
+            _message_cb(shared_from_this(), _in_buffer);
+        }
+    }
+    release();
+}
+```
+
+修改后，可观察到此时客户端断连后，不再有日志的ERROR报错，htop查询到CPU使用率也恢复正常，说明连接被正常关闭
+
+![image-20250209021211307](https://ckfs.oss-cn-beijing.aliyuncs.com/img/202502090212414.png)
+
+## HTTP协议模块
+

@@ -406,10 +406,10 @@ public:
             // 接收出错 or 连接断开，不能重新接收数据，返回-1
             DF_ERROR("Recv from fd-%d failed: %s", _sockfd, strerror(errno));//为什么连接断开，还会报这个错误？
             // printf("Recv from fd-%d failed: %s", _sockfd, strerror(errno));
-            if(ret == 0)
-            {
-                DF_DEBUG("连接%d被挂断了", _sockfd);
-            }
+            // if(ret == 0)
+            // {
+            //     DF_DEBUG("连接%d被挂断了", _sockfd);
+            // }
             return -1;
         }
         // 数据接收成功
@@ -1202,8 +1202,8 @@ private:
         ssize_t ret = _socket.NonBlockRecv(buf, sizeof(buf));
         if (ret < 0)
         {
-            DF_DEBUG("连接%d被挂断了, 尝试关闭连接", _socket.Fd());
-            // 读取失败，关闭连接（并不是真正的关闭，而要去看看写缓冲区中还有没有数据，有的话要先处理掉）
+            DF_DEBUG("连接fd: %d 被挂断了, 尝试关闭连接", _socket.Fd());
+            // 读取失败，关闭连接
             // shutdown();
             handleClose();
             return;
@@ -1298,7 +1298,7 @@ private:
         // 1.检查读缓冲区中是否还有数据待处理，有的话先处理完
         if (_in_buffer.readableBytes() > 0)
         {
-            DF_DEBUG("连接%d还有数据待处理, 先处理完再关闭", _socket.Fd());
+            // DF_DEBUG("连接%d还有数据待处理, 先处理完再关闭", _socket.Fd());
             if (_message_cb)
             {
                 _message_cb(shared_from_this(), _in_buffer);
@@ -1313,7 +1313,7 @@ private:
         }
         else
         {
-            DF_DEBUG("连接%d没有数据待发送, 直接关闭", _socket.Fd());
+            // DF_DEBUG("连接%d没有数据待发送, 直接关闭", _socket.Fd());
             // 没有数据待发送，直接关闭
             release();
         }
