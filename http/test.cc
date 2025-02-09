@@ -73,6 +73,12 @@ void testUrl(const std::string url, bool convertSpace = false)
     std::cout << "解码后: " << decode << std::endl;
 }
 
+void testHttpRequest(const std::string& req_str)
+{
+    // HttpRequest req(req_str);
+    // req.debug();
+}
+
 int main()
 {
     // // 测试用例1：基本用例
@@ -117,12 +123,12 @@ int main()
     // testUrl("/login?user=kf&passwd=123456&lang=C++");
     // testUrl("/login?user=k f&passwd=123456&lang=C++", true);
 
-    std::cout << Util::getStatusDesc(404) << std::endl;
-    std::cout << Util::getStatusDesc(999) << std::endl;
+    // std::cout << Util::getStatusDesc(404) << std::endl;
+    // std::cout << Util::getStatusDesc(999) << std::endl;
 
-    std::cout << Util::getMimeType("test.txt") << std::endl;
-    std::cout << Util::getMimeType("test.jpg") << std::endl;
-    std::cout << Util::getMimeType("test.aaa") << std::endl;
+    // std::cout << Util::getMimeType("test.txt") << std::endl;
+    // std::cout << Util::getMimeType("test.jpg") << std::endl;
+    // std::cout << Util::getMimeType("test.aaa") << std::endl;
 
     // std::cout << Util::isDirectory("../logger") << std::endl;
     // std::cout << Util::isDirectory("./test.txt") << std::endl;
@@ -132,13 +138,16 @@ int main()
     // std::cout << Util::isRegularFile("..") << std::endl;
 
     
-    std::cout << Util::isVaildPath("/index.html") << std::endl;//1
-    std::cout << Util::isVaildPath("/../index.html") << std::endl;//0
-    std::cout << Util::isVaildPath("/src/../index.html") << std::endl;//1
-    std::cout << Util::isVaildPath("/src/../../index.html") << std::endl;//0
-    std::cout << Util::isVaildPath("/././././index.html") << std::endl;//1
-    std::cout << Util::isVaildPath("/index/..") << std::endl;//1
+    // std::cout << Util::isVaildPath("/index.html") << std::endl;//1
+    // std::cout << Util::isVaildPath("/../index.html") << std::endl;//0
+    // std::cout << Util::isVaildPath("/src/../index.html") << std::endl;//1
+    // std::cout << Util::isVaildPath("/src/../../index.html") << std::endl;//0
+    // std::cout << Util::isVaildPath("/././././index.html") << std::endl;//1
+    // std::cout << Util::isVaildPath("/index/..") << std::endl;//1
 
-
+    std::string req_str = R"(POST /api/login?debug=true HTTP/1.1\r\nHost: api.example.com\r\nContent-Type: application/json\r\nContent-Length: 52\r\n\r\n{"username": "test", "password": "123456"})";
+    // testSplit(req_str,"\\r\\n",{"POST /api/login?debug=true HTTP/1.1", "Host: api.example.com", "Content-Type: application/json", "Content-Length: 52", "Authorization: Bearer abc123", "X-Custom-Header: value", "", "{\"username\": \"test\", \"password\": \"123456\"}"});
+    // testSplit(req_str, "\\r\\n", {"GET /index.html HTTP/1.1", "Host: www.example.com"});
+    testHttpRequest(req_str);
     return 0;
 }

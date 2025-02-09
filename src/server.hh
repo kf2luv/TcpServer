@@ -140,15 +140,15 @@ public:
     }
 
     /// @brief 向缓冲区写入数据
-    /// @param data 写入数据起始地址，统一转成void*就不用管类型
+    /// @param data 写入数据的源地址，统一转成void*就不用管类型
     /// @param len 待写入的数据字节数
-    void write(const void *data, size_t len)
+    void write(const void *src, size_t len)
     {
         // 1.确保缓冲区的写入空间充足
         ensureEnoughWriteSpace(len);
 
         // 2.写入数据
-        const byte *source = (const byte *)data;
+        const byte *source = (const byte *)src;
         std::copy(source, source + len, writePos());
 
         // 3.移动写偏移
@@ -167,14 +167,14 @@ public:
     }
 
     /// @brief 从缓冲区读取数据，要求获取的len必须小于可读数据字节数
-    /// @param data 读取数据起始地址
+    /// @param data 读取数据的目的地址
     /// @param len 待读取的数据字节数
-    void read(void *data, size_t len)
+    void read(void *dest, size_t len)
     {
         assert(len <= readableBytes());
 
         // 1.读取数据
-        std::copy(readPos(), readPos() + len, (char *)data);
+        std::copy(readPos(), readPos() + len, (char *)dest);
 
         // 2.移动读偏移
         _read_idx += len;
@@ -191,16 +191,16 @@ public:
         return str;
     }
 
-    // 获取读取一行（以/n结尾）
-    std::string getLine()
+    // 获取读取一行（包含 换行符）
+    std::string getLine(const std::string& line_brk)
     {
-        byte *pos = (char *)memchr(readPos(), '\n', readableBytes());
-        if (pos == NULL)
+        byte *CRLF = strstr(readPos(), line_brk.c_str());
+        if (CRLF == NULL)
         {
             return "";
         }
-        //+1把\n也取出来
-        return readAsString(pos - readPos() + 1);
+        //把"\\r\\n"也取出来
+        return readAsString(CRLF - readPos() + line_brk.size());
     }
 
     // 清理缓冲区
