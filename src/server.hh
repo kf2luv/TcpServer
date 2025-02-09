@@ -191,7 +191,7 @@ public:
         return str;
     }
 
-    // 获取读取一行（包含 换行符）
+    // 获取读取一行（包含换行符，找不到换行符就不读取，返回空串）
     std::string getLine(const std::string& line_brk)
     {
         byte *CRLF = strstr(readPos(), line_brk.c_str());
@@ -1388,7 +1388,7 @@ private:
         _looper->cancelTimer(_conn_id);
     }
     // 切换协议上下文
-    void switchContextInLoop(const Any &context,
+    void upgradeContextInLoop(const Any &context,
                              const ConnectionCallback &closed_cb,
                              const ConnectionCallback &connected_cb,
                              const ConnectionCallback &any_cb,
@@ -1449,14 +1449,17 @@ public:
     {
         _looper->runInLoop(std::bind(&Connection::disableInactiveCloseInLoop, this));
     }
-    void switchContext(const Any &context, // 切换协议上下文，需要更改回调函数 (必须在EventLoop线程立即执行)
-                       const ConnectionCallback &closed_cb,
-                       const ConnectionCallback &connected_cb,
-                       const ConnectionCallback &any_cb,
-                       const MessageCallback &message_cb)
+
+    // 切换协议上下文，需要更改回调函数
+    // 必须在EventLoop线程立即执行，防止放入任务队列后，新事件触发并先于upgradeContext处理，此时用的是旧的协议，不符合预期
+    void upgradeContext(const Any &context, 
+                         const ConnectionCallback &closed_cb,
+                         const ConnectionCallback &connected_cb,
+                         const ConnectionCallback &any_cb,
+                         const MessageCallback &message_cb)
     {
         _looper->assertInLoop();
-        _looper->runInLoop(std::bind(&Connection::switchContextInLoop, this,
+        _looper->runInLoop(std::bind(&Connection::upgradeContextInLoop, this,
                                      context, closed_cb, connected_cb, any_cb, message_cb));
     }
 
