@@ -79,6 +79,19 @@ void testHttpRequest(const std::string& req_str)
     // req.debug();
 }
 
+// 获取读取一行（包含换行符，找不到换行符就不读取，返回空串）
+// std::string getLine(const std::string& line_brk)
+// {
+//     char *CRLF = strstr(readPos(), line_brk.c_str());
+//     if (CRLF == NULL)
+//     {
+//         DF_DEBUG("没有找到换行符");
+//         return "";
+//     }
+//     //把"\\r\\n"也取出来
+//     return readAsString(CRLF - readPos() + line_brk.size());
+// }
+
 int main()
 {
     // // 测试用例1：基本用例

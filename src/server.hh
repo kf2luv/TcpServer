@@ -119,7 +119,7 @@ private:
 class Buffer
 {
     using byte = char;
-    static const size_t DEFAULT_BUF_SIZE = 1024;
+    static const size_t DEFAULT_BUF_SIZE = 8192;
 
 public:
     Buffer(size_t size = DEFAULT_BUF_SIZE)
@@ -194,13 +194,18 @@ public:
     // 获取读取一行（包含换行符，找不到换行符就不读取，返回空串）
     std::string getLine(const std::string& line_brk)
     {
-        byte *CRLF = strstr(readPos(), line_brk.c_str());
-        if (CRLF == NULL)
+        // DF_DEBUG("Buffer中的数据: %s", readPos());
+
+        char *CRLF = static_cast<char*>(memmem(readPos(), readableBytes(), line_brk.c_str(), line_brk.size()));
+        if (CRLF == nullptr)
         {
+            DF_DEBUG("没有找到换行符");
             return "";
         }
         //把"\\r\\n"也取出来
-        return readAsString(CRLF - readPos() + line_brk.size());
+        std::string line = readAsString(CRLF - readPos() + line_brk.size());
+        // DF_DEBUG("one line: %s", line.c_str());
+        return line;
     }
 
     // 清理缓冲区
@@ -256,7 +261,6 @@ private:
         // 2.判断总体的剩余空间是否足够
         if (writeableBytes() >= len)
         {
-            std::cout << "挪动了一次数据" << std::endl;
             // 将数据挪到起始位置，读写偏移要跟着移动
             size_t rbytes = readableBytes();
             std::copy(readPos(), readPos() + rbytes, begin());
@@ -267,7 +271,6 @@ private:
         }
 
         // 3.扩容，保证写偏移之后有足够的空间
-        std::cout << "扩容了一次" << std::endl;
         size_t newSize = _write_idx + len;
         _buffer.resize(newSize);
     }
@@ -1718,7 +1721,7 @@ private:
     }
 
 public:
-    // 给一个端口号，创建Tcp服务器
+    // 给一个端口号，创建Tcp服务器 
     TcpServer(uint16_t port)
         :_loop_pool(&_base_looper) 
         ,_acceptor(port, &_base_looper, std::bind(&TcpServer::acceptHandler, this, std::placeholders::_1))

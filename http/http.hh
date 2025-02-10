@@ -17,6 +17,7 @@ class Util
 {
 public:
     // 分割字符串，以sep作为分隔字符串，对str进行分割，最终结果保存到result中，返回分割后的子串个数
+    // result必须为空
     static size_t split(const std::string &str, const std::string &sep, std::vector<std::string> &result, bool skip_empty = true)
     {
         size_t begin = 0, end = 0;
@@ -444,7 +445,14 @@ public:
     // 获取头部字段
     std::string getHeader(const std::string &key) const
     {
-        return hasHeader(key) ? _headers[key] : "";
+        auto it = _headers.find(key);
+        if(it == _headers.end())
+        {
+            return "";
+        }
+        return it->second;
+
+        // return hasHeader(key) ? _headers[key] : "";
     }
     // 查看头部字段是否存在
     bool hasHeader(const std::string &key) const
@@ -464,7 +472,14 @@ public:
     // 获取查询字符串参数
     std::string getParam(const std::string &key) const
     {
-        return hasParam(key) ? _query_params[key] : "";
+        auto it = _query_params.find(key);
+        if(it == _query_params.end())
+        {
+            return "";
+        }
+        return it->second;
+
+        // return hasParam(key) ? _query_params[key] : "";
     }
     // 查看查询字符串参数是否存在
     bool hasParam(const std::string &key) const
@@ -483,10 +498,35 @@ public:
     }
 
     // 判断是否为短连接
-    bool close() const
+    bool close()
     {
         return !hasHeader("Connection") || getHeader("Connection") == "close";
     }
+
+    void printRequestInfo()
+    {
+        std::cout << "====== HTTP Request Debug Info ======" << std::endl;
+        std::cout << "Method: " << _method << std::endl;
+        std::cout << "URL: " << _url << std::endl;
+        std::cout << "Resource Path: " << _resource_path << std::endl;
+        std::cout << "HTTP Version: " << _version << std::endl;
+
+        std::cout << "Headers: " << std::endl;
+        for (const auto &header : _headers)
+        {
+            std::cout << "  " << header.first << ": " << header.second << std::endl;
+        }
+
+        std::cout << "Query Parameters: " << std::endl;
+        for (const auto &param : _query_params)
+        {
+            std::cout << "  " << param.first << ": " << param.second << std::endl;
+        }
+
+        std::cout << "Body: " << _body << std::endl;
+        std::cout << "=====================================" << std::endl;
+    }
+
 }; // HttpRequest
 
 // http响应信息模块
@@ -560,14 +600,14 @@ public:
     {
         std::ostringstream ss;
         //首行
-        ss << _version << " " << _stat_code << " " << Util::getStatusDesc(_stat_code) << "\\r\\n";
+        ss << _version << " " << _stat_code << " " << Util::getStatusDesc(_stat_code) << "\r\n";
         //报头
         for(auto& [k, v] : _headers)
         {
-            ss << k << ": " << v << "\\r\\n";
+            ss << k << ": " << v << "\r\n";
         }
         //空行
-        ss << "\\r\\n";
+        ss << "\r\n";
         //正文
         ss << _body;
 
@@ -620,9 +660,15 @@ public:
         }
         switch (_parse_stat)
         {
-            case PARSE_REQUEST_LINE: recvRequestLine(buffer);
-            case PARSE_HEADERS: recvHeaders(buffer);
-            case PARSE_BODY: recvBody(buffer);
+        case PARSE_REQUEST_LINE:
+            recvRequestLine(buffer);
+                // DF_DEBUG("请求行解析成功");
+        case PARSE_HEADERS:
+            recvHeaders(buffer);
+                // DF_DEBUG("请求报头解析成功");
+        case PARSE_BODY:
+            recvBody(buffer);
+                // DF_DEBUG("请求正文解析成功");
         }
         return _parse_stat != PARSE_ERROR;
     }
@@ -642,7 +688,7 @@ private:
             return false;
         }
         // 1.读取buffer中的一行数据
-        std::string line = buffer.getLine("\\r\\n");
+        std::string line = buffer.getLine("\r\n");
         if (line.size() == 0)//找不到换行符
         {
             // 缓冲区数据不足一行，且长度过长，设置状态码
@@ -664,13 +710,14 @@ private:
             return false;
         }
         // 2.去除line中的换行符，方便正则表达式匹配
-        line.erase(line.size() - strlen("\\r\\n"));
+        line.erase(line.size() - strlen("\r\n"));
 
         // 2.解析请求行
         bool ret = parseRequestLine(line);
         if(ret == true)
         {
             _parse_stat = PARSE_HEADERS;// 当前解析成功完成，更改为下一个解析状态
+            return true;
         }
         return false;
     }
@@ -694,15 +741,16 @@ private:
         std::string method = matches[1];
         std::transform(method.begin(), method.end(), method.begin(), ::toupper);
         _request._method = method;
-
         _request._resource_path = Util::urlDecode(matches[2]); // 资源路径
+        _request._url = _request._resource_path;               // URL
         if (matches[3].matched)                                // 查询字符串（如果有）
         {
             std::vector<std::string> params;
             Util::split(matches[3].str(), "&", params);
-            std::vector<std::string> kv(2);
+            std::vector<std::string> kv;
             for (auto &param : params)
             {
+                kv.clear();
                 size_t ret = Util::split(param, "=", kv);
                 if (ret != 2)
                 {
@@ -716,6 +764,7 @@ private:
             }
         }
         _request._version = matches[4]; // 协议版本
+        _request._version = "HTTP/" + _request._version;
         return true;
     }
 
@@ -728,7 +777,7 @@ private:
         // 1.逐行获取数据
         while (true)
         {
-            std::string line = buffer.getLine("\\r\\n");
+            std::string line = buffer.getLine("\r\n");
             if (line.size() == 0) // 没有换行符，不构成一行数据
             {
                 if (buffer.readableBytes() > MAX_LINE_LEN)
@@ -745,12 +794,13 @@ private:
                 _resp_stat_code = 414; // URI TOO LONG
                 return false;
             }
-            if (line == "\\r\\n")
+            if (line == "\r\n")
             {
                 // 读到空行，代表header处理结束
-                return true;
+                break;
             }
-
+            // 去除行末换行符
+            line.erase(line.size() - strlen("\r\n"));
             // 2.解析一个请求头部
             if (parseHeaders(line) == false)
             {
@@ -765,12 +815,13 @@ private:
     bool parseHeaders(const std::string &line)
     {
         // Content-Length: 50
-        std::vector<std::string> kv(2);
+        std::vector<std::string> kv;
         size_t ret = Util::split(line, ": ", kv);
         if (ret != 2)
         {
             _parse_stat = PARSE_ERROR;
             _resp_stat_code = 400; // Bad Request
+            DF_ERROR("parseHeaders fail: %s", line.c_str());
             return false;
         }
         std::string key = kv[0];
@@ -788,22 +839,19 @@ private:
         }
         // 1.获取请求的正文长度
         size_t content_length = _request.getContentLength();
-        if (_request._body.empty())
+
+        if (content_length == 0)
         {
-            // 初次读取正文
-            if (content_length == 0)
-            {
-                // 没有正文
-                _parse_stat = PARSE_FINISHED;
-                return true;
-            }
-            if (content_length > MAX_BODY_LEN)
-            {
-                // 请求正文过大
-                _parse_stat = PARSE_ERROR;
-                _resp_stat_code = 413; // Payload Too Large
-                return false;
-            }
+            // 没有正文
+            _parse_stat = PARSE_FINISHED;
+            return true;
+        }
+        if (content_length > MAX_BODY_LEN)
+        {
+            // 请求正文过大
+            _parse_stat = PARSE_ERROR;
+            _resp_stat_code = 413; // Payload Too Large
+            return false;
         }
 
         // 2.获取当前已读取的正文长度，判断还差多少
@@ -833,8 +881,9 @@ private:
 //HTTP服务器
 class HttpServer
 {
+    static const int DEFAULT_ACTIVE_TIMEOUT = 10;
     using Handler = std::function<void(const HttpRequest &request, HttpResponse &response)>;
-    using HandlerMap = std::unordered_map<std::regex, Handler>;
+    using HandlerMap = std::vector<std::pair<std::regex, Handler>>;
 
 private:
     TcpServer _server;         // 底层IO的tcp服务器
@@ -846,16 +895,13 @@ private:
     HandlerMap _delete_router; // DELETE方法路由表
 
 private:
-
     //为tcp服务器设置的回调函数
-
 
     void onConnected(const PtrConnection& conn)
     {
         //将连接上下文设置为HttpContext
         conn->setContext(HttpContext());
     }
-
 
     // 读缓冲区数据到来，进行处理
     // 通过连接的http上下文，接受一个http请求信息
@@ -865,6 +911,9 @@ private:
     // 最后根据连接是否为长连接，判断是否关闭连接
     void onMessage(const PtrConnection & conn, Buffer & buffer)
     {
+        DF_DEBUG("进入HTTP server onMessage, connection id: %d", conn->Id());
+        // DF_DEBUG("Buffer中的数据: %s", buffer.readPos());
+
         while(buffer.readableBytes() > 0) 
         {
             //1.获取连接的上下文信息
@@ -873,9 +922,10 @@ private:
             //2.从缓冲区读取并解析一个请求
             bool ok = context->recvAndParseRequest(buffer);
             HttpResponse response(context->getRespStatCode());
-
-            if(!ok && context->getParseStat() == PARSE_ERROR)
+            if(context->getParseStat() == PARSE_ERROR)
             {
+                DF_DEBUG("HTTP解析出错");
+                // 解析出错
                 // 组织一个错误显示的页面到响应中
                 errorPageResponse(response);
                 // 返回响应给客户端（注意此时获取的request是无效的，但是由于后面连接就要关闭了，所以无所谓）
@@ -888,17 +938,33 @@ private:
             }
             else if(context->getParseStat() != PARSE_FINISHED)
             {
+                DF_DEBUG("未能从缓冲区中读取一个完整的HTTP请求");
                 //未能从缓冲区中读取一个完整的request，先返回，等待新数据到来再处理
                 return;
             }
             assert(context->getParseStat() == PARSE_FINISHED);
             
+            DF_DEBUG("获取到一个完整的HTTP请求");
+            
             //3.成功读取到一个完整的request，走到这里request才是有效的，路由找到业务函数handler
             HttpRequest request = context->getRequest();
-            auto handler = route(request, response);
+            request.printRequestInfo();
 
+            auto handler = route(request, response);
+            if(!handler)
+            {
+                // 路由失败，不能业务处理
+                errorPageResponse(response);
+                writeResponse(conn, request, response);
+                buffer.clear();
+                conn->shutdown();
+                return;
+            }
+
+            DF_DEBUG("路由查找成功, 开始执行业务函数");
             //4.调用handler进行业务处理
             handler(request, response);
+            DF_DEBUG("业务处理完成");
 
             //5.将响应返回给客户端
             writeResponse(conn, request, response);
@@ -907,10 +973,12 @@ private:
             if(request.close())
             {
                 //短连接关闭
+                DF_DEBUG("关闭短连接, %d", conn->Id());
                 conn->shutdown();
                 return;
             }
-            //长连接，循环处理，先重置上下文
+            // 长连接，循环处理，先重置上下文
+            // 长连接是否有效? TODO
             context->reset();
         }
     }
@@ -935,9 +1003,12 @@ private:
     void writeResponse(const PtrConnection & conn, const HttpRequest& request, HttpResponse& response)
     {
         // 1.为response填充一些必要的信息
-        if(request.close()) {
+        if(request.close()) 
+        {
             response.setHeader("Connection", "close");//短连接
-        } else{
+        } 
+        else
+        {
             response.setHeader("Connection", "keep-alive");//长连接
         }
 
@@ -957,25 +1028,160 @@ private:
 
         // 2.将response对象序列化
         std::string resp_str = response.serialize();
+        DF_DEBUG("response str: %s", resp_str.c_str());
 
         // 3.返回响应
         conn->send(resp_str.c_str(), resp_str.size());
     }
 
+    // 根据request请求信息，返回从路由表中找到的业务处理函数，找不到则通过response返回错误信息Method Not Allowed
+    Handler route(HttpRequest &request, HttpResponse &response)
+    {
+        // 判断是否为静态资源请求
+        if (isStaticResourceRequest(request))
+        {
+            return std::bind(&HttpServer::staticResourceHandler, this, std::placeholders::_1, std::placeholders::_2);
+        }
 
-    // 根据request请求信息，从路由表中找到对应的业务处理函数，找不到则通过response返回错误信息Method Not Allowed
-    Handler route(const HttpRequest& request, HttpResponse& response);
+        if (request._method == "GET")
+        {
+            return routeInMap(request, response, _get_router);
+        }
+        if (request._method == "POST")
+        {
+            return routeInMap(request, response, _post_router);
+        }
+        if (request._method == "PUT")
+        {
+            return routeInMap(request, response, _put_router);
+        }
+        if (request._method == "DELETE")
+        {
+            return routeInMap(request, response, _delete_router);
+        }
+        // 请求方法不合法，通过response返回错误信息Method Not Allowed
+        response._stat_code = 405;
+        return Handler();
+    }
+
+    Handler routeInMap(HttpRequest &request, HttpResponse &response, HandlerMap &handlers)
+    {
+        // 遍历整个handlers表，请求url与每一个正则表达式尝试匹配，匹配成功则返回对应的方法handler
+        for (auto &h : handlers)
+        {
+            auto reg = h.first;
+            auto handler = h.second;
+            bool is_match = std::regex_match(request._url, request._matches, reg);
+            if (is_match)
+            {
+                return handler;
+            }
+        }
+        // url匹配失败，Not Found
+        response._stat_code = 404;
+        return Handler();
+    }
+
+    // 判断请求是否为一个（有效的）静态资源请求
+    bool isStaticResourceRequest(const HttpRequest& request)
+    {
+        // 静态资源根目录不能为空
+        if(this->_base_dir.empty())
+        {
+            return false;
+        }
+
+        // 请求方法必须是Get or Head
+        if(request._method != "GET" && request._method != "HEAD")
+        {
+            return false;
+        }
+
+        // 请求资源路径必须合法（相对路径）
+        if(!Util::isVaildPath(request._resource_path))
+        {
+            return false;
+        }
+
+        // 加上base_dir后的绝对路径也必须合法
+        // 特殊情况，路径为：'xxx/'，解析为 "base_dir/index.html"
+        std::string real_path = this->_base_dir + request._resource_path;
+        if(real_path.back() == '/')
+        {
+            real_path += "index.html";
+        }
+        //不是普通文件，就不是静态资源请求
+        if(!Util::isRegularFile(real_path))
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    void staticResourceHandler(const HttpRequest& request, HttpResponse& response)
+    {
+        // 将文件读取出来，填充到response的正文中，并修改一些header
+        std::string real_path = this->_base_dir + request._resource_path;
+        if(real_path.back() == '/')
+        {
+            real_path += "index.html";
+        }
+
+        std::string data;
+        if(!Util::readFile(real_path, data))
+        {
+            //服务器内部错误
+            response._stat_code = 500;
+            return;
+        }
+
+        response._body = data;
+        response.setHeader("Content-Type",Util::getMimeType(real_path));
+    }
 
 public:
-    HttpServer();
+    HttpServer(uint32_t port, size_t work_thread_count = 2, bool enable_inactive_close = true) :_server(port)
+    {
+        // 设置loop线程数
+        _server.setThreadCount(work_thread_count);
+        // 设置超时连接时间（默认开启）
+        if(enable_inactive_close)
+        {
+            _server.enableInactiveClose(DEFAULT_ACTIVE_TIMEOUT);
+        }
+        // 设置server的连接建立回调和消息回调
+        _server.setConnectedCallback(std::bind(&HttpServer::onConnected, this, std::placeholders::_1));
+        _server.setMessageCallback(std::bind(&HttpServer::onMessage, this, std::placeholders::_1, std::placeholders::_2));
+    }
+
+    // 设置静态资源根目录
+    void SetBaseDir(const std::string base_dir)
+    {
+        assert(Util::isDirectory(base_dir) == true);
+        _base_dir = base_dir;
+    }
 
     // 设置各种请求方法的路由项
-    void Get(const std::string pattern, const Handler &handler);
-    void Post(const std::string pattern, const Handler &handler);
-    void Put(const std::string pattern, const Handler &handler);
-    void Delete(const std::string pattern, const Handler &handler);
-    // 设置工作线程数量
-    void SetThreadCount(size_t count);
+    void Get(const std::string pattern, const Handler &handler)
+    {
+        _get_router.push_back(std::make_pair(std::regex(pattern), handler));
+    }
+    void Post(const std::string pattern, const Handler &handler)
+    {
+        _post_router.push_back(std::make_pair(std::regex(pattern), handler));
+    }
+    void Put(const std::string pattern, const Handler &handler)
+    {
+        _put_router.push_back(std::make_pair(std::regex(pattern), handler));
+    }
+    void Delete(const std::string pattern, const Handler &handler)
+    {
+        _delete_router.push_back(std::make_pair(std::regex(pattern), handler));
+    }
     // 服务器开始运行
-    void Start();
+    void Listen()
+    {
+        _server.start();
+    }
 };
