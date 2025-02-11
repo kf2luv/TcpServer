@@ -376,6 +376,7 @@ namespace ckflogs
         {
             LoggerBuilder::Ptr builder = std::make_shared<LocalLoggerBuilder>();
             builder->bulidName("default_logger");
+            builder->bulidLevel(LogLevel::Value::ERROR);
             default_logger_ = builder->build();
             loggers_["default_logger"] = default_logger_;
         }

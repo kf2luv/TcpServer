@@ -498,7 +498,7 @@ public:
     }
 
     // 判断是否为短连接
-    bool close()
+    bool close() const
     {
         return !hasHeader("Connection") || getHeader("Connection") == "close";
     }
@@ -626,11 +626,10 @@ typedef enum
     PARSE_FINISHED,     // 解析完成
 } HttpParseStat;
 
+#define MAX_BODY_LEN (5 * 1024 * 1024 * 1024)
 class HttpContext
 {
-    const static size_t MAX_LINE_LEN = 8192;             // 8KB
-    const static size_t MAX_BODY_LEN = 10 * 1024 * 1024; // 10MB
-
+    const static size_t MAX_LINE_LEN = 8192; // 8KB
 private:
     HttpRequest _request;      // 请求信息
     HttpParseStat _parse_stat; // 当前解析状态
@@ -846,7 +845,7 @@ private:
             _parse_stat = PARSE_FINISHED;
             return true;
         }
-        if (content_length > MAX_BODY_LEN)
+        if ((uint64_t)content_length > MAX_BODY_LEN)
         {
             // 请求正文过大
             _parse_stat = PARSE_ERROR;
@@ -872,11 +871,11 @@ private:
             // 读取正文结束
             _parse_stat = PARSE_FINISHED;
         }
+
         return true;
     }
 
 }; // HttpContext
-
 
 //HTTP服务器
 class HttpServer
@@ -900,6 +899,7 @@ private:
     void onConnected(const PtrConnection& conn)
     {
         //将连接上下文设置为HttpContext
+        DF_DEBUG("New connection id: %d", conn->Id());
         conn->setContext(HttpContext());
     }
 
@@ -911,7 +911,7 @@ private:
     // 最后根据连接是否为长连接，判断是否关闭连接
     void onMessage(const PtrConnection & conn, Buffer & buffer)
     {
-        DF_DEBUG("进入HTTP server onMessage, connection id: %d", conn->Id());
+        // DF_DEBUG("进入HTTP server onMessage, connection id: %d", conn->Id());
         // DF_DEBUG("Buffer中的数据: %s", buffer.readPos());
 
         while(buffer.readableBytes() > 0) 
@@ -930,7 +930,8 @@ private:
                 errorPageResponse(response);
                 // 返回响应给客户端（注意此时获取的request是无效的，但是由于后面连接就要关闭了，所以无所谓）
                 writeResponse(conn, context->getRequest(), response);
-                // 清空缓冲区，连接出错，数据是无效的，避免干扰关闭连接的操作
+                // 清空缓冲区，连接出错，数据是无效的，避免干扰关闭连接的操作(读缓冲区里如果还有数据, shutdown在关闭前会再调用一次onMessage, 最终可能会导致死循环)
+                context->reset();
                 buffer.clear();
                 // 关闭连接
                 conn->shutdown();
@@ -938,17 +939,17 @@ private:
             }
             else if(context->getParseStat() != PARSE_FINISHED)
             {
-                DF_DEBUG("未能从缓冲区中读取一个完整的HTTP请求");
+                // DF_DEBUG("未能从缓冲区中读取一个完整的HTTP请求");
                 //未能从缓冲区中读取一个完整的request，先返回，等待新数据到来再处理
                 return;
             }
             assert(context->getParseStat() == PARSE_FINISHED);
             
-            DF_DEBUG("获取到一个完整的HTTP请求");
+            // DF_DEBUG("获取到一个完整的HTTP请求");
             
             //3.成功读取到一个完整的request，走到这里request才是有效的，路由找到业务函数handler
             HttpRequest request = context->getRequest();
-            request.printRequestInfo();
+            // request.printRequestInfo();
 
             auto handler = route(request, response);
             if(!handler)
@@ -961,10 +962,10 @@ private:
                 return;
             }
 
-            DF_DEBUG("路由查找成功, 开始执行业务函数");
+            // DF_DEBUG("路由查找成功, 开始执行业务函数");
             //4.调用handler进行业务处理
             handler(request, response);
-            DF_DEBUG("业务处理完成");
+            // DF_DEBUG("业务处理完成");
 
             //5.将响应返回给客户端
             writeResponse(conn, request, response);
@@ -973,7 +974,7 @@ private:
             if(request.close())
             {
                 //短连接关闭
-                DF_DEBUG("关闭短连接, %d", conn->Id());
+                // DF_DEBUG("关闭短连接, %d", conn->Id());
                 conn->shutdown();
                 return;
             }
@@ -1141,14 +1142,14 @@ private:
     }
 
 public:
-    HttpServer(uint32_t port, size_t work_thread_count = 2, bool enable_inactive_close = true) :_server(port)
+    HttpServer(uint32_t port, size_t work_thread_count = 2, bool enable_inactive_close = true, int timeout = DEFAULT_ACTIVE_TIMEOUT) :_server(port)
     {
         // 设置loop线程数
         _server.setThreadCount(work_thread_count);
         // 设置超时连接时间（默认开启）
         if(enable_inactive_close)
         {
-            _server.enableInactiveClose(DEFAULT_ACTIVE_TIMEOUT);
+            _server.enableInactiveClose(timeout);
         }
         // 设置server的连接建立回调和消息回调
         _server.setConnectedCallback(std::bind(&HttpServer::onConnected, this, std::placeholders::_1));

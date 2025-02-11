@@ -1,10 +1,12 @@
 #include <iostream>
 #include "http.hh"
 
+#define BASE_DIR "/home/kf/tcp-server/http/wwwroot"
+
 int main()
 {
-    HttpServer svr(8777);
-    svr.SetBaseDir("/home/kf/tcp-server/http/wwwroot");
+    HttpServer svr(8777, 3, true, 100);
+    svr.SetBaseDir(BASE_DIR);
 
     svr.Get("/test1", [](const HttpRequest &request, HttpResponse &response){
         response._stat_code = 200;
@@ -43,8 +45,28 @@ int main()
 
     svr.Get("/hi", [](const HttpRequest &request, HttpResponse &response){
         response._stat_code = 200;
-        response._body = "TEST KEEP ALIVE";
+        response._body = "TEST";
         response.setHeader("Content-Type", "text/plain");
+        return;
+    });
+
+    svr.Get("/hello", [](const HttpRequest &request, HttpResponse &response){
+        sleep(15);//模拟业务超时
+        response._stat_code = 200;
+        response._body = "TEST";
+        response.setHeader("Content-Type", "text/plain");
+        return;
+    });
+
+    svr.Put("/upload/big.txt", [](const HttpRequest &request, HttpResponse &response){
+        //保存文件内容
+        std::string path = BASE_DIR;
+        path += "/big.txt";
+        if(Util::writeFile(path, request._body)){
+            response._stat_code = 200;
+        }else{
+            response._stat_code = 500;
+        }
         return;
     });
 
