@@ -641,7 +641,7 @@ private:
     EventCallback _close_callback;
     EventCallback _any_callback;
 
-    EventLoop *_looper = nullptr; // 事件监控器(后续改为EventLoop)
+    EventLoop *_looper = nullptr; // 事件监控器
 };
 
 /*
@@ -864,8 +864,8 @@ private:
         _idToTimer[id] = TimerWeak(ptr);
 
         // !!警告!!
-        // 直接使用原始资源的指针创建shared_ptr
-        // 每次都是建立一个新的shared_ptr，新的计数器，并不是共享计数器
+        // 如果直接使用原始资源的指针创建shared_ptr
+        // 那每次都是建立一个新的shared_ptr，创建新的计数器，并没有实现计数器的共享
         // 使用weak_ptr解决，weak_ptr.lock()获取的shared_ptr，会增加引用计数
         //  _wheel[pos].push_back(TimerPtr(tt));
     }
@@ -997,7 +997,7 @@ public:
     {
         while (true)
         {
-            // 1.IO事件监听 (可能会被eventfd唤醒，此时应跳到第3步)
+            // 1.IO事件监听
             std::vector<Channel *> actives;
             _poller.poll(actives);
 
@@ -1095,6 +1095,7 @@ private:
             }
             tasks.swap(_tasks);
         }
+        // 加锁只是把任务队列中的任务拿出来，然后解锁，再执行每个任务，降低锁的力度
         for (auto &t : tasks)
         {
             t();
@@ -1144,12 +1145,14 @@ private:
 
 private:
     std::thread::id _thread_id;              // 事件循环所在线程id
-    int _eventfd;                            // 用于唤醒IO事件监听阻塞
-                                             // （向eventfd计数器写入，就有了一个读事件，就可以唤醒了），先去执行任务
-    std::unique_ptr<Channel> _event_channel; // eventfd对应的channel
     Poller _poller;                          // 事件监听器
+    
+    int _eventfd;                            // 用于唤醒IO事件监听阻塞（向eventfd计数器写入，就有了一个读事件，就可以唤醒）
+    std::unique_ptr<Channel> _event_channel; // eventfd对应的channel
+
     std::vector<Task> _tasks;                // 任务池
     std::mutex _mtx;                         // 保护任务池
+
     TimerWheel _timer_wheel;                 // 定时器
 };
 
@@ -1416,7 +1419,7 @@ public:
     {
         return _socket.Fd();
     }
-    int Id() const // 获取连接的ID
+    int Id() const // 获取连接的ID#
     {
         return _conn_id;
     }
